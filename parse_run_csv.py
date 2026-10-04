@@ -25,6 +25,12 @@ EF_BASELINE     = 0.92   # m/beat baseline (good aerobic efficiency)
 NOISE_ELEV_M    = 0.5    # ignore elevation deltas below this (GPS noise filter)
 SPRINT_PACE_S   = 15     # sec/km faster than median to flag sprint
 SPRINT_HR_BPM   = 5      # bpm above median to confirm sprint
+# Drift thresholds (%) calibrated for drift measured without warm-up
+DRIFT_LOW       = 3      # below: good aerobic coupling
+DRIFT_HIGH      = 6      # above: fatigue/heat flag, +1 rest day
+DRIFT_VERY_HIGH = 8      # above: recovery-length next run
+DRIFT_PROGRESS  = 4      # below (with improving EF): distance can progress
+DRIFT_INTENSIFY = 3      # below (with improving EF): pace can drop slightly
 WARMUP_S        = 600    # warm-up excluded from cardiac drift (capped at 25% of the run)
 FETCH_WEATHER   = True   # False or --no-weather: no coordinates sent to Open-Meteo
 HISTORY_FILE    = "running_history.csv"
@@ -528,21 +534,21 @@ def recommendations(history, session, legs):
     if tss > 80:  rest += 1
     if tss > 120: rest += 1
     if legs == "dolenti": rest += 1
-    if drift is not None and drift > 8: rest += 1
+    if drift is not None and drift > DRIFT_HIGH: rest += 1
     rest = min(rest, 4)
 
     # Distance recommendation
     dist_rec = dist
-    if ef_trend == "improving" and (drift is None or drift < 6):
+    if ef_trend == "improving" and (drift is None or drift < DRIFT_PROGRESS):
         dist_rec = round(dist * 1.08, 1)   # +8% load progression
-    elif legs in ("dolenti", "pesanti") or (drift is not None and drift > 10):
+    elif legs in ("dolenti", "pesanti") or (drift is not None and drift > DRIFT_VERY_HIGH):
         dist_rec = round(dist * 0.85, 1)   # recovery run
 
     # Pace adjustment (seconds/km)
     pace_rec = pace
     if legs == "dolenti":
         pace_rec += 20
-    elif ef_trend == "improving" and (drift is None or drift < 5):
+    elif ef_trend == "improving" and (drift is None or drift < DRIFT_INTENSIFY):
         pace_rec -= 5
 
     print("\n" + "═" * 52)
@@ -558,9 +564,9 @@ def recommendations(history, session, legs):
         print("  ⚠  Gambe dolenti → carico ridotto, +1 giorno riposo")
     elif legs == "fresche":
         print("  ✓  Gambe fresche → puoi spingere")
-    if drift is not None and drift > 8:
+    if drift is not None and drift > DRIFT_HIGH:
         print(f"  ⚠  Drift elevato ({drift:.1f}%) → fatica accumulata")
-    elif drift is not None and drift < 3:
+    elif drift is not None and drift < DRIFT_LOW:
         print(f"  ✓  Drift basso ({drift:.1f}%) → ottima forma aerobica")
     print("═" * 52)
 
@@ -620,7 +626,7 @@ def analyze(filepath):
         status = "✓" if ef >= EF_BASELINE else "○"
         print(f"  EF:         {ef:.3f} m/batt {status}")
     if drift is not None:
-        note = "↑ deriva" if drift > 8 else ("↓ fresco" if drift < 3 else "~")
+        note = "↑ deriva" if drift > DRIFT_HIGH else ("↓ fresco" if drift < DRIFT_LOW else "~")
         suffix = " (escluso sprint)" if is_sprint else ""
         print(f"  Drift:      {drift:.1f}% {note}{suffix}")
     if tss:

@@ -49,6 +49,7 @@ Personal parameters are constants at the top of the script. Edit them to match y
 | `THRESHOLD_HR` | Lactate-threshold heart rate (bpm) |
 | `EF_BASELINE` | Baseline efficiency (m/beat) used as a reference |
 | `FETCH_WEATHER` | Query Open-Meteo for weather (`--no-weather` disables it) |
+| `DRIFT_LOW`, `DRIFT_HIGH`, `DRIFT_VERY_HIGH` | Drift thresholds (%) for the "good" / "high" / "very high" messages and the rest-day and distance adjustments |
 | `WARMUP_S` | Seconds excluded from the start when computing cardiac drift |
 | `NOISE_ELEV_M` | Elevation changes below this are ignored as GPS noise |
 | `SPRINT_PACE_S`, `SPRINT_HR_BPM` | How much faster / higher than the median flags a sprint |

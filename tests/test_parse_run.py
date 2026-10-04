@@ -116,6 +116,19 @@ class ParseRunTests(unittest.TestCase):
         self.assertEqual(P.hms_csv(2019), "00:33:39")
         self.assertEqual(P.parse_pace("07:27"), 447)
 
+    def test_high_drift_adds_rest_day(self):
+        import io, contextlib
+        hist = [{"data": "2026-05-01", "orario": "07:00", "ef_m_batt": "0.90"},
+                {"data": "2026-05-03", "orario": "07:00", "ef_m_batt": "0.92"}]
+        base = {"dist_km": 5.0, "tss": 40, "_pace_s": 450}
+        def rest_for(drift):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                P.recommendations(hist, dict(base, drift_pct=drift), "ok")
+            return int(buf.getvalue().split("Riposo:")[1].split()[0])
+        self.assertEqual(rest_for(5.0), 1)
+        self.assertEqual(rest_for(6.5), 2)
+
     def test_ef_and_tss(self):
         self.assertAlmostEqual(P.compute_ef(5.0, 2250, 155), 5000 / (155 * 37.5), places=3)
         self.assertAlmostEqual(P.compute_tss(3600, P.THRESHOLD_HR), 100.0, places=1)
