@@ -58,6 +58,16 @@ class ParseRunTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["gambe"], "dolenti")
 
+    def test_upsert_keeps_recorded_legs_when_reprocessed(self):
+        old = {"data": "2026-05-07", "orario": "07:51", "gambe": "dolenti"}
+        new = {"data": "2026-05-07", "orario": "07:51", "gambe": ""}
+        self.assertEqual(P.upsert([old], new)[0]["gambe"], "dolenti")
+
+    def test_is_latest_only_for_newest_session(self):
+        hist = [{"data": "2026-05-07", "orario": "07:51"}, {"data": "2026-05-09", "orario": "08:00"}]
+        self.assertFalse(P.is_latest(hist, hist[0]))
+        self.assertTrue(P.is_latest(hist, hist[1]))
+
     def test_ef_and_tss(self):
         self.assertAlmostEqual(P.compute_ef(5.0, 2250, 155), 5000 / (155 * 37.5), places=3)
         self.assertAlmostEqual(P.compute_tss(3600, P.THRESHOLD_HR), 100.0, places=1)

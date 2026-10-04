@@ -391,15 +391,24 @@ def save_history(records):
         w.writerows(records)
 
 
+def session_key(r):
+    return (r.get("data", ""), r.get("orario", ""))
+
+
 def upsert(records, rec):
-    """Deduplicate by (data, orario); overwrite if same session."""
-    key = (rec["data"], rec["orario"])
+    """Deduplicate by (data, orario); overwrite if same session, keeping its recorded `gambe`."""
     for i, r in enumerate(records):
-        if (r.get("data"), r.get("orario")) == key:
+        if session_key(r) == session_key(rec):
+            if not rec.get("gambe"):
+                rec["gambe"] = r.get("gambe", "")
             records[i] = rec
             return records
     records.append(rec)
     return records
+
+
+def is_latest(history, rec):
+    return bool(history) and session_key(rec) == max(session_key(r) for r in history)
 
 # ─── Recommendations ─────────────────────────────────────────────────────────
 
@@ -612,21 +621,25 @@ def main():
 
     print(f"\n{len(sessions)} sessione/i analizzata/e.")
 
-    # Leg condition for the most recent session
+    sessions.sort(key=session_key)
+    for sess in sessions:
+        history = upsert(history, sess)
+    history.sort(key=session_key)
+
     last = sessions[-1]
-    if len(sessions) > 1:
-        print(f"\nUltima sessione: {last['data']} {last['orario']}")
-    legs = get_leg_condition()
-    last["gambe"] = legs
+    latest = is_latest(history, last)
+    if latest:
+        legs = get_leg_condition()
+        last["gambe"] = legs
 
-    for s in sessions:
-        history = upsert(history, s)
-
-    history.sort(key=lambda r: (r.get("data", ""), r.get("orario", "")))
     save_history(history)
     print(f"\n  ✓ Storico aggiornato: {HISTORY_FILE} ({len(history)} sessioni)")
 
-    recommendations(history, last, legs)
+    if latest:
+        recommendations(history, last, legs)
+    else:
+        newest = history[-1]
+        print(f"\n  Nessun consiglio: l'ultima sessione dello storico è {newest['data']} {newest['orario']}.")
 
 
 if __name__ == "__main__":
