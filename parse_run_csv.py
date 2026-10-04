@@ -592,19 +592,29 @@ def find_run_files(directory="."):
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 def main():
-    global FETCH_WEATHER
+    global FETCH_WEATHER, HISTORY_FILE
     args = sys.argv[1:]
     if "--no-weather" in args:
         FETCH_WEATHER = False
         args = [a for a in args if a != "--no-weather"]
+    data_dir = os.environ.get("RUNNING_COACH_DATA", ".")
+    if "--data" in args:
+        i = args.index("--data")
+        if i + 1 >= len(args):
+            sys.exit("--data richiede una cartella")
+        data_dir = args[i + 1]
+        del args[i:i + 2]
+    if not os.path.isdir(data_dir):
+        sys.exit(f"Cartella dati non trovata: {data_dir}")
+    HISTORY_FILE = os.path.join(data_dir, HISTORY_FILE)
     if args:
         files = args
     else:
-        files = find_run_files(".")
+        files = [os.path.join(data_dir, f) for f in find_run_files(data_dir)]
 
     if not files:
         print("Nessun file RUNNING trovato.")
-        print("Uso: python parse_run_csv.py [file.csv]")
+        print("Uso: python parse_run_csv.py [--data CARTELLA] [--no-weather] [file.csv ...]")
         sys.exit(1)
 
     history  = load_history()

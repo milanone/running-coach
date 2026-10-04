@@ -20,6 +20,7 @@ Console output and the history column names are in Italian.
 python parse_run_csv.py                  # process every "YYYY.MM.DD HH.MM-RUNNING.csv" in the folder
 python parse_run_csv.py "file.csv"       # process a single file
 python parse_run_csv.py --no-weather     # skip the Open-Meteo lookup
+python parse_run_csv.py --data ..\\running-coach-data   # read CSVs and keep running_history.csv in another folder
 ```
 
 1. Export the activity as CSV from intervals.icu.
@@ -49,6 +50,10 @@ Personal parameters are constants at the top of the script. Edit them to match y
 | `FETCH_WEATHER` | Query Open-Meteo for weather (`--no-weather` disables it) |
 | `NOISE_ELEV_M` | Elevation changes below this are ignored as GPS noise |
 | `SPRINT_PACE_S`, `SPRINT_HR_BPM` | How much faster / higher than the median flags a sprint |
+
+**Keeping data out of this repo.** Use `--data FOLDER` (or set the `RUNNING_COACH_DATA`
+environment variable) to read the activity CSVs from, and write `running_history.csv` to, a
+separate folder — for example a private data-only repository cloned next to this one.
 
 ## Tests
 
