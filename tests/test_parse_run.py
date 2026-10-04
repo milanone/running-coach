@@ -15,7 +15,7 @@ def load(**kw):
 
 
 class ParseRunTests(unittest.TestCase):
-    def test_distance_ignores_doubled_samsung_field_and_gps_lockup(self):
+    def test_distance_column_with_gps_lockup(self):
         pts, _ = load(km=6.0)
         self.assertAlmostEqual(pts[-1]["dist_m"] / 1000, 6.0, delta=0.05)
 
@@ -31,6 +31,14 @@ class ParseRunTests(unittest.TestCase):
         self.assertAlmostEqual(P.elevation_gain(pts), 10.0, delta=0.6)
         flat_noise = [{"alt": 100 + (0.2 if i % 2 else 0)} for i in range(100)]
         self.assertEqual(P.elevation_gain(flat_noise), 0.0)
+
+    def test_distance_column_used_as_is_when_correct(self):
+        pts, _ = load(km=6.0, icu_format=True, dist_factor=1)
+        self.assertAlmostEqual(pts[-1]["dist_m"], 6000, delta=5)
+
+    def test_gps_fallback_when_no_distance_column(self):
+        pts, _ = load(km=6.0, icu_format=True, dist_factor=0)
+        self.assertAlmostEqual(pts[-1]["dist_m"] / 1000, 6.0, delta=0.1)
 
     def test_splits(self):
         _, splits = load(km=6.0)
@@ -88,11 +96,12 @@ class ParseRunTests(unittest.TestCase):
                 P.HISTORY_FILE = old
         self.assertEqual([r["data"] for r in rows], ["29/04/2026", "07/05/2026", "01/06/2026"])
         may7 = rows[1]
-        self.assertEqual(may7["dist_km"], "4.82")
+        self.assertEqual(may7["dist_km"], "4.80")
         self.assertEqual(may7["temp_c"], "18.0")
-        self.assertEqual(may7["durata_hms"], "00:42:11")
+        self.assertEqual(may7["durata_hms"], "00:42:00")
         self.assertEqual(may7["passo_minkm"], "08:45")
         self.assertEqual(may7["gambe"], "ok")
+        self.assertEqual(may7["drift_pct"], "5.0")
 
     def test_pace_and_duration_formats(self):
         self.assertEqual(P.pace_csv(447), "07:27")

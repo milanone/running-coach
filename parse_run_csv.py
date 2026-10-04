@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 parse_run_csv.py – Running activity analyzer for intervals.icu CSV exports
-(Samsung Health source via intervals.icu)
+(activities recorded with Samsung Health, exported from intervals.icu)
 
 Usage:
     python parse_run_csv.py             # process all YYYY.MM.DD HH.MM-RUNNING.csv
@@ -20,7 +20,7 @@ import sys, csv, os, math, re
 from datetime import datetime, timedelta
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-THRESHOLD_HR    = 165    # lactate threshold HR (bpm)
+THRESHOLD_HR    = 170    # lactate threshold HR (bpm); matches the original TSS values
 EF_BASELINE     = 0.92   # m/beat baseline (good aerobic efficiency)
 NOISE_ELEV_M    = 0.5    # ignore elevation deltas below this (GPS noise filter)
 SPRINT_PACE_S   = 15     # sec/km faster than median to flag sprint
@@ -184,21 +184,38 @@ def extract_points(rows, start=None):
 
 # ─── Distance (GPS + pre-GPS estimation) ─────────────────────────────────────
 
+def distances_from_field(pts):
+    """Use the file's cumulative `distance` column (forward-filled, monotonic).
+    Returns False if the column is missing or unusable."""
+    raw = [p["dist_raw"] for p in pts if p["dist_raw"] is not None]
+    if len(raw) < 10 or max(raw) <= 0:
+        return False
+    cum = 0.0
+    for p in pts:
+        if p["dist_raw"] is not None:
+            cum = max(cum, p["dist_raw"])
+        p["dist_m"] = cum
+    for i, p in enumerate(pts):
+        p["delta_m"] = max(0.0, p["dist_m"] - (pts[i - 1]["dist_m"] if i else 0))
+    return True
+
+
 def compute_distances(pts):
     """
-    Build cumulative dist_m for each point using haversine GPS.
-    Samsung Health doubles the distance field → use GPS coordinates instead.
-    Pre-GPS lockup period: estimate distance via average GPS pace.
+    Cumulative dist_m per point. Primary source: the `distance` column. Fallback (no usable
+    column): haversine GPS, estimating the pre-GPS lockup period from the average GPS pace.
     """
+    if distances_from_field(pts):
+        return pts
     first_gps = next((i for i, p in enumerate(pts)
                       if p["lat"] is not None and p["lon"] is not None), None)
 
     if first_gps is None:
-        # No GPS at all: fall back to dist_raw / 2
+        # No GPS and no usable distance column: use whatever raw values exist
         cum = 0.0
         for i, p in enumerate(pts):
             raw = p["dist_raw"]
-            p["dist_m"] = (raw / 2.0) if raw is not None else cum
+            p["dist_m"] = raw if raw is not None else cum
             p["delta_m"] = max(0.0, p["dist_m"] - (pts[i-1]["dist_m"] if i else 0))
             cum = p["dist_m"]
         return pts
@@ -421,14 +438,13 @@ def session_key(r):
     return (date_iso(r.get("data", "")), (r.get("orario") or "").strip())
 
 
-def upsert(records, rec, keep_old_legs=False):
+def upsert(records, rec):
     """Deduplicate by (date, time) across date formats; the new record wins, but fields it
-    leaves empty (weather, `gambe`) keep the previously recorded value. With keep_old_legs the
-    recorded `gambe` always survives (used when merging duplicates already in the file)."""
+    leaves empty (weather, `gambe`) keep the previously recorded value."""
     for i, r in enumerate(records):
         if session_key(r) == session_key(rec):
             for k in HISTORY_FIELDS:
-                if rec.get(k) in ("", None) or (k == "gambe" and keep_old_legs and r.get(k)):
+                if rec.get(k) in ("", None):
                     rec[k] = r.get(k, "")
             records[i] = rec
             return records
@@ -448,16 +464,17 @@ def normalize_row(r):
 
 
 def load_history():
-    """Read the history in any mix of date formats; collapse duplicate sessions (rows written
-    in ISO format by newer runs win over older dd/mm/yyyy rows) and sort chronologically."""
+    """Read the history in any mix of date formats; collapse duplicate sessions (the original
+    dd/mm/yyyy row wins; ISO-dated rows from earlier script versions only fill its empty
+    fields) and sort chronologically."""
     if not os.path.exists(HISTORY_FILE):
         return []
     with open(HISTORY_FILE, newline="", encoding="utf-8-sig") as f:
         raw = list(csv.DictReader(f))
-    raw.sort(key=lambda r: bool(re.match(r"\d{4}-\d{2}-\d{2}", (r.get("data") or "").strip())))
+    raw.sort(key=lambda r: not re.match(r"\d{4}-\d{2}-\d{2}", (r.get("data") or "").strip()))
     out = []
     for r in raw:
-        upsert(out, normalize_row(r), keep_old_legs=True)
+        upsert(out, normalize_row(r))
     return sorted(out, key=session_key)
 
 
@@ -669,17 +686,32 @@ def main():
     if not os.path.isdir(data_dir):
         sys.exit(f"Cartella dati non trovata: {data_dir}")
     HISTORY_FILE = os.path.join(data_dir, HISTORY_FILE)
+    reprocess_all = "--all" in args
+    args = [a for a in args if a != "--all"]
+    history = load_history()
     if args:
         files = args
     else:
         files = [os.path.join(data_dir, f) for f in find_run_files(data_dir)]
+        if not reprocess_all:
+            known = {session_key(r) for r in history}
+            def file_key(fp):
+                st = filename_start(fp)
+                return (st.strftime("%Y-%m-%d"), st.strftime("%H:%M")) if st else None
+            skipped = sum(file_key(f) in known for f in files)
+            files = [f for f in files if file_key(f) not in known]
+            if skipped:
+                print(f"{skipped} sessioni già nello storico, saltate (usa --all per rielaborarle).")
 
+    if not files and history:
+        save_history(history)
+        print("Nessuna sessione nuova.")
+        return
     if not files:
         print("Nessun file RUNNING trovato.")
-        print("Uso: python parse_run_csv.py [--data CARTELLA] [--no-weather] [file.csv ...]")
+        print("Uso: python parse_run_csv.py [--data CARTELLA] [--no-weather] [--all] [file.csv ...]")
         sys.exit(1)
 
-    history  = load_history()
     sessions = []
 
     for fp in files:
