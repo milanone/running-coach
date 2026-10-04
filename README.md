@@ -8,7 +8,7 @@ Console output and the history column names are in Italian.
 
 ## Metrics
 
-- **Efficiency Factor (EF)** — metres covered per heartbeat; higher means better aerobic efficiency.
+- **Efficiency Factor (EF)** — metres covered per heartbeat-per-minute (`distance_m / (avg_hr × minutes)`); higher means better aerobic efficiency.
 - **Cardiac drift** — how much heart rate rises relative to pace over the session (%); a high
   value points to fatigue, heat or dehydration.
 - **TSS** — a training-stress score from duration and heart rate relative to threshold.
@@ -19,6 +19,7 @@ Console output and the history column names are in Italian.
 ```
 python parse_run_csv.py                  # process every "YYYY.MM.DD HH.MM-RUNNING.csv" in the folder
 python parse_run_csv.py "file.csv"       # process a single file
+python parse_run_csv.py --no-weather     # skip the Open-Meteo lookup
 ```
 
 1. Export the activity as CSV from intervals.icu.
@@ -34,7 +35,7 @@ the session in `running_history.csv`.
 **Weather lookup.** For each session it queries the
 [Open-Meteo](https://open-meteo.com) historical API with the **start coordinates** of the
 activity to record temperature, humidity and wind. If the request fails the script continues
-without weather data. Remove the call to `fetch_weather()` if you do not want coordinates sent
+without weather data. Pass `--no-weather` (or set `FETCH_WEATHER = False`) if you do not want coordinates sent
 to an external service.
 
 ## Configuration
@@ -45,6 +46,7 @@ Personal parameters are constants at the top of the script. Edit them to match y
 |---|---|
 | `THRESHOLD_HR` | Lactate-threshold heart rate (bpm) |
 | `EF_BASELINE` | Baseline efficiency (m/beat) used as a reference |
+| `FETCH_WEATHER` | Query Open-Meteo for weather (`--no-weather` disables it) |
 | `NOISE_ELEV_M` | Elevation changes below this are ignored as GPS noise |
 | `SPRINT_PACE_S`, `SPRINT_HR_BPM` | How much faster / higher than the median flags a sprint |
 

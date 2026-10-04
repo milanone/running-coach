@@ -25,6 +25,7 @@ EF_BASELINE     = 0.92   # m/beat baseline (good aerobic efficiency)
 NOISE_ELEV_M    = 0.5    # ignore elevation deltas below this (GPS noise filter)
 SPRINT_PACE_S   = 15     # sec/km faster than median to flag sprint
 SPRINT_HR_BPM   = 5      # bpm above median to confirm sprint
+FETCH_WEATHER   = True   # False or --no-weather: no coordinates sent to Open-Meteo
 HISTORY_FILE    = "running_history.csv"
 HISTORY_FIELDS  = [
     "data", "orario", "dist_km", "durata_hms", "passo_minkm",
@@ -486,7 +487,7 @@ def analyze(filepath):
 
     # Weather
     first_gps_pt = next((p for p in pts if p.get("lat") and p.get("lon")), None)
-    weather = fetch_weather(first_gps_pt["lat"], first_gps_pt["lon"], start_ts) if first_gps_pt else None
+    weather = fetch_weather(first_gps_pt["lat"], first_gps_pt["lon"], start_ts) if first_gps_pt and FETCH_WEATHER else None
 
     # ── Print session summary ─────────────────────────────────────────────
     print(f"\n  Data:       {start_ts.strftime('%d/%m/%Y %H:%M')}")
@@ -554,8 +555,13 @@ def find_run_files(directory="."):
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 def main():
-    if len(sys.argv) > 1:
-        files = sys.argv[1:]
+    global FETCH_WEATHER
+    args = sys.argv[1:]
+    if "--no-weather" in args:
+        FETCH_WEATHER = False
+        args = [a for a in args if a != "--no-weather"]
+    if args:
+        files = args
     else:
         files = find_run_files(".")
 
