@@ -32,6 +32,7 @@ class GuiSmokeTests(unittest.TestCase):
                 write_run(os.path.join(d, f"{name}-RUNNING.csv"), km=km, icu_format=True, sprint=km == 5.0)
             cfg = os.path.join(d, "cfg.json")
             app = gui.App(data_dir=d, config_path=cfg)
+            self.assertEqual(json.load(open(cfg))["data_dir"], d)
             try:
                 app.fetch.set(False)
                 asked = []
@@ -51,6 +52,22 @@ class GuiSmokeTests(unittest.TestCase):
 
                 app.tabs.select(1)
                 app.update()
+                km = lambda: [app.tree.set(i, "dist_km") for i in app.tree.get_children()]
+                app.sort_by("dist_km")
+                self.assertEqual(km(), ["4.0", "5.0", "6.0"])
+                self.assertIn("▲", app.tree.heading("dist_km")["text"])
+                app.sort_by("dist_km")
+                self.assertEqual(km(), ["6.0", "5.0", "4.0"])
+                self.assertIn("▼", app.tree.heading("dist_km")["text"])
+                app.sort_by("gambe")
+                self.assertEqual(app.tree.set(app.tree.get_children()[0], "gambe"), "pesanti")
+                app.sort_by("gambe")
+                self.assertEqual(app.tree.set(app.tree.get_children()[0], "gambe"), "pesanti")
+                self.assertEqual(app.tree.set(app.tree.get_children()[-1], "gambe"), "")
+                app.sort_by("data")
+                self.assertEqual(app.tree.set(app.tree.get_children()[0], "data"), "15/05/2026")
+                app.sort_by("data")
+                app.sort_by("data")
                 for label, *_ in gui.METRICS:
                     app.metric.set(label)
                     app.draw_chart()

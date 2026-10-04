@@ -86,6 +86,7 @@ class App(tk.Tk):
         self.config_path = config_path
         cfg = load_config(config_path)
         self.history = []
+        self.sort_col, self.sort_desc = "data", True
         self.queue = queue.Queue()
         self.busy = False
 
@@ -134,8 +135,9 @@ class App(tk.Tk):
         paned.add(top, weight=3)
         self.tree = ttk.Treeview(top, columns=[c[0] for c in TABLE_COLUMNS], show="headings", selectmode="browse")
         for key, title, width in TABLE_COLUMNS:
-            self.tree.heading(key, text=title)
+            self.tree.heading(key, text=title, command=lambda k=key: self.sort_by(k))
             self.tree.column(key, width=width, anchor="center")
+        self.update_headings()
         sb = ttk.Scrollbar(top, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -214,6 +216,8 @@ class App(tk.Tk):
     def reload(self):
         d = self._dir()
         self.history = core.load_history(core.history_path(d)) if d else []
+        if d:
+            self._save_config()
         for b in (self.btn_import, self.btn_all):
             b.state(["!disabled"] if d else ["disabled"])
         self.refresh_table()
@@ -229,7 +233,7 @@ class App(tk.Tk):
 
     def refresh_table(self, select=None):
         self.tree.delete(*self.tree.get_children())
-        for r in sorted(self.history, key=core.session_key, reverse=True):
+        for r in self.sorted_history():
             iid = "|".join(core.session_key(r))
             self.tree.insert("", "end", iid=iid, values=[r.get(k, "") for k, _, _ in TABLE_COLUMNS],
                              tags=(r.get("gambe", ""),))
@@ -240,6 +244,47 @@ class App(tk.Tk):
             self.tree.see(target)
         else:
             self.show_detail()
+
+    def sort_value(self, row, key):
+        raw = str(row.get(key) or "").strip()
+        if key == "data":
+            return core.session_key(row)
+        if not raw:
+            return None
+        if key == "orario":
+            return raw
+        if key == "passo_minkm":
+            return core.parse_pace(raw)
+        if key == "durata_hms":
+            try:
+                h, m, sec = (int(x) for x in raw.split(":"))
+                return h * 3600 + m * 60 + sec
+            except ValueError:
+                return None
+        if key == "gambe":
+            return core.LEG_OPTIONS.index(raw) if raw in core.LEG_OPTIONS else None
+        return core.safe_float(raw)
+
+    def sorted_history(self):
+        """History ordered by the active column; rows without a value always go last."""
+        rows = sorted(self.history, key=core.session_key, reverse=True)
+        keyed = [(self.sort_value(r, self.sort_col), r) for r in rows]
+        present = sorted((kr for kr in keyed if kr[0] is not None), key=lambda kr: kr[0], reverse=self.sort_desc)
+        return [r for _, r in present] + [r for v, r in keyed if v is None]
+
+    def update_headings(self):
+        for key, title, _ in TABLE_COLUMNS:
+            arrow = (" ▼" if self.sort_desc else " ▲") if key == self.sort_col else ""
+            self.tree.heading(key, text=title + arrow)
+
+    def sort_by(self, key):
+        if key == self.sort_col:
+            self.sort_desc = not self.sort_desc
+        else:
+            self.sort_col, self.sort_desc = key, key == "data"
+        self.update_headings()
+        current = self.tree.selection()
+        self.refresh_table(select=current[0] if current else None)
 
     def selected_row(self):
         sel = self.tree.selection()
@@ -463,8 +508,11 @@ class App(tk.Tk):
     def _on_error(self, exc, val, tb):
         messagebox.showerror("Errore", f"{exc.__name__}: {val}")
 
-    def _close(self):
+    def _save_config(self):
         save_config(self.config_path, {"data_dir": self.data_dir.get(), "fetch_weather": self.fetch.get()})
+
+    def _close(self):
+        self._save_config()
         self.destroy()
 
 
