@@ -129,6 +129,23 @@ class ParseRunTests(unittest.TestCase):
         self.assertEqual(rest_for(5.0), 1)
         self.assertEqual(rest_for(6.5), 2)
 
+    def test_import_sessions_session_file_and_recommendations(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_run(os.path.join(d, "2026.05.07 07.51-RUNNING.csv"), icu_format=True, sprint=True)
+            res = P.import_sessions(d, fetch=False)
+            self.assertEqual((len(res["sessions"]), res["skipped"], res["errors"]), (1, 0, []))
+            history = P.merge_sessions(res["history"], res["sessions"])
+            P.save_history(history, P.history_path(d))
+            again = P.import_sessions(d, fetch=False)
+            self.assertEqual((len(again["sessions"]), again["skipped"]), (0, 1))
+            self.assertTrue(P.session_file(d, history[0]).endswith("2026.05.07 07.51-RUNNING.csv"))
+            open(os.path.join(d, "2026.05.08 07.00-RUNNING.csv"), "w").write("time\n0\n")
+            bad = P.import_sessions(d, fetch=False)
+            self.assertEqual(len(bad["errors"]), 1)
+        rec = P.compute_recommendations(history, history[0], "dolenti")
+        self.assertEqual(rec["rest"], 2)
+        self.assertTrue(any("dolenti" in t for _, t in rec["notes"]))
+
     def test_ef_and_tss(self):
         self.assertAlmostEqual(P.compute_ef(5.0, 2250, 155), 5000 / (155 * 37.5), places=3)
         self.assertAlmostEqual(P.compute_tss(3600, P.THRESHOLD_HR), 100.0, places=1)

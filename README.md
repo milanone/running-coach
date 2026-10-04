@@ -15,7 +15,26 @@ Console output and the history column names are in Italian.
 - **TSS** — a training-stress score from duration and heart rate relative to threshold.
 - **Elevation** — ascent/descent with a GPS-noise filter.
 
-## Usage
+## GUI
+
+```
+py running-coach-gui.pyw        # or double-click the file (Windows opens it without a console)
+```
+
+Pick the data folder (the one with the `YYYY.MM.DD HH.MM-RUNNING.csv` files and `running_history.csv`;
+it is remembered in `~/.running_coach_gui.json`), then:
+
+- **Importa nuove corse** analyses only the CSVs not yet in the history and asks how your legs feel
+  after the newest one. **Rielabora tutto** recomputes every session (weather and legs are kept).
+- **Storico** lists all sessions; select one to see the per-km splits, sprint note and weather, and
+  change its leg condition.
+- **Grafici** plots distance, pace, heart rate, EF, drift or TSS over time with a 3-session moving average.
+- **Prossima sessione** shows the recommended rest, distance and pace.
+
+The GUI and the command line share the same logic (`parse_run_csv.py`) and the same history file.
+
+## Command line
+
 
 ```
 python parse_run_csv.py                  # process every "YYYY.MM.DD HH.MM-RUNNING.csv" in the folder
@@ -75,4 +94,5 @@ Keep your own data files out of version control.
 
 ## Requirements
 
-Python 3, standard library only.
+Python 3, standard library only. The GUI needs Tkinter, which ships with the standard Python
+installer on Windows and macOS (Linux: `sudo apt install python3-tk`).

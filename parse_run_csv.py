@@ -474,13 +474,18 @@ def normalize_row(r):
     return r
 
 
-def load_history():
+def history_path(data_dir):
+    return os.path.join(data_dir, "running_history.csv")
+
+
+def load_history(path=None):
     """Read the history in any mix of date formats; collapse duplicate sessions (the original
     dd/mm/yyyy row wins; ISO-dated rows from earlier script versions only fill its empty
     fields) and sort chronologically."""
-    if not os.path.exists(HISTORY_FILE):
+    path = path or HISTORY_FILE
+    if not os.path.exists(path):
         return []
-    with open(HISTORY_FILE, newline="", encoding="utf-8-sig") as f:
+    with open(path, newline="", encoding="utf-8-sig") as f:
         raw = list(csv.DictReader(f))
     raw.sort(key=lambda r: not re.match(r"\d{4}-\d{2}-\d{2}", (r.get("data") or "").strip()))
     out = []
@@ -489,8 +494,8 @@ def load_history():
     return sorted(out, key=session_key)
 
 
-def save_history(records):
-    with open(HISTORY_FILE, "w", newline="", encoding="utf-8") as f:
+def save_history(records, path=None):
+    with open(path or HISTORY_FILE, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=HISTORY_FIELDS, extrasaction="ignore")
         w.writeheader()
         w.writerows(records)
@@ -499,27 +504,31 @@ def save_history(records):
 def is_latest(history, rec):
     return bool(history) and session_key(rec) == max(session_key(r) for r in history)
 
+def merge_sessions(history, sessions):
+    """Merge new session dicts into the history (new rows win) and return it sorted."""
+    for sess in sorted(sessions, key=session_key):
+        history = upsert(history, sess)
+    return sorted(history, key=session_key)
+
 # ─── Recommendations ─────────────────────────────────────────────────────────
 
+LEG_OPTIONS = ["fresche", "ok", "pesanti", "dolenti"]
+
+
 def get_leg_condition():
-    opts = {"1": "fresche", "2": "ok", "3": "pesanti", "4": "dolenti"}
     print("\nCondizione gambe:")
-    for k, v in opts.items():
-        print(f"  {k}) {v}")
+    for i, v in enumerate(LEG_OPTIONS, 1):
+        print(f"  {i}) {v}")
     ch = input("Scelta [1-4, default 2]: ").strip() or "2"
-    return opts.get(ch, "ok")
+    return LEG_OPTIONS[int(ch) - 1] if ch in "1234" and len(ch) == 1 else "ok"
 
 
-def recommendations(history, session, legs):
-    hist = sorted(history, key=lambda r: (r.get("data", ""), r.get("orario", "")))
-    recent = hist[-4:] if len(hist) >= 4 else hist
+def compute_recommendations(history, session, legs):
+    """Next-session advice: {rest, dist_km, pace_s, ef_trend, notes: [(icon, text)]}."""
+    hist = sorted(history, key=session_key)
+    recent = hist[-4:]
 
-    # EF trend over recent sessions
-    ef_vals = []
-    for r in recent:
-        v = safe_float(r.get("ef_m_batt"))
-        if v:
-            ef_vals.append(v)
+    ef_vals = [v for v in (safe_float(r.get("ef_m_batt")) for r in recent) if v]
     ef_trend = None
     if len(ef_vals) >= 2:
         ef_trend = "improving" if ef_vals[-1] > ef_vals[0] else "declining"
@@ -529,7 +538,6 @@ def recommendations(history, session, legs):
     dist  = safe_float(session.get("dist_km")) or 5.0
     pace  = session.get("_pace_s") or parse_pace(session.get("passo_minkm")) or 390
 
-    # Rest days
     rest = 1
     if tss > 80:  rest += 1
     if tss > 120: rest += 1
@@ -537,126 +545,93 @@ def recommendations(history, session, legs):
     if drift is not None and drift > DRIFT_HIGH: rest += 1
     rest = min(rest, 4)
 
-    # Distance recommendation
     dist_rec = dist
     if ef_trend == "improving" and (drift is None or drift < DRIFT_PROGRESS):
         dist_rec = round(dist * 1.08, 1)   # +8% load progression
     elif legs in ("dolenti", "pesanti") or (drift is not None and drift > DRIFT_VERY_HIGH):
         dist_rec = round(dist * 0.85, 1)   # recovery run
 
-    # Pace adjustment (seconds/km)
     pace_rec = pace
     if legs == "dolenti":
         pace_rec += 20
     elif ef_trend == "improving" and (drift is None or drift < DRIFT_INTENSIFY):
         pace_rec -= 5
 
+    notes = []
+    if legs == "dolenti":
+        notes.append(("⚠", "Gambe dolenti → carico ridotto, +1 giorno riposo"))
+    elif legs == "fresche":
+        notes.append(("✓", "Gambe fresche → puoi spingere"))
+    if drift is not None and drift > DRIFT_HIGH:
+        notes.append(("⚠", f"Drift elevato ({drift:.1f}%) → fatica accumulata"))
+    elif drift is not None and drift < DRIFT_LOW:
+        notes.append(("✓", f"Drift basso ({drift:.1f}%) → ottima forma aerobica"))
+    return {"rest": rest, "dist_km": dist_rec, "pace_s": pace_rec, "ef_trend": ef_trend, "notes": notes}
+
+
+def recommendations(history, session, legs):
+    rec = compute_recommendations(history, session, legs)
+    rest = rec["rest"]
     print("\n" + "═" * 52)
     print("  PROSSIMA SESSIONE CONSIGLIATA")
     print("═" * 52)
     print(f"  Riposo:   {rest} {'giorno' if rest == 1 else 'giorni'}")
-    print(f"  Distanza: {dist_rec:.1f} km")
-    print(f"  Passo:    {format_pace(pace_rec)}/km")
-    if ef_trend:
-        arrow = "↑" if ef_trend == "improving" else "↓"
-        print(f"  EF trend: {arrow} {ef_trend}")
-    if legs == "dolenti":
-        print("  ⚠  Gambe dolenti → carico ridotto, +1 giorno riposo")
-    elif legs == "fresche":
-        print("  ✓  Gambe fresche → puoi spingere")
-    if drift is not None and drift > DRIFT_HIGH:
-        print(f"  ⚠  Drift elevato ({drift:.1f}%) → fatica accumulata")
-    elif drift is not None and drift < DRIFT_LOW:
-        print(f"  ✓  Drift basso ({drift:.1f}%) → ottima forma aerobica")
+    print(f"  Distanza: {rec['dist_km']:.1f} km")
+    print(f"  Passo:    {format_pace(rec['pace_s'])}/km")
+    if rec["ef_trend"]:
+        arrow = "↑" if rec["ef_trend"] == "improving" else "↓"
+        print(f"  EF trend: {arrow} {rec['ef_trend']}")
+    for icon, text in rec["notes"]:
+        print(f"  {icon}  {text}")
     print("═" * 52)
 
 # ─── Single-file analysis ─────────────────────────────────────────────────────
 
-def analyze(filepath):
-    print(f"\n{'═'*60}")
-    print(f"  {os.path.basename(filepath)}")
-    print(f"{'═'*60}")
+def weather_warnings(w):
+    out = []
+    if w["umidita_pct"] > 75:
+        out.append("Umidità >75%: termoregolazione compromessa")
+    if w["temp_c"] > 22:
+        out.append(f"Caldo ({w['temp_c']:.0f}°C): atteso rallentamento ~{int((w['temp_c']-18)*12)} sec/km")
+    return out
 
+
+def analyze_file(filepath, fetch=None):
+    """Analyse one CSV. Returns {session, splits, is_sprint, sprint_idx, elev, avg_hr, weather,
+    start, dur_s, total_km, pace_s, ef, drift, tss}; raises ValueError(message) if unusable."""
+    if fetch is None:
+        fetch = FETCH_WEATHER
     rows = load_csv(filepath)
     if not rows:
-        print("  File vuoto."); return None
-
+        raise ValueError("File vuoto.")
     pts = extract_points(rows, filename_start(filepath))
     if len(pts) < 5:
-        print("  Troppo pochi punti."); return None
-
+        raise ValueError("Troppo pochi punti.")
     pts = compute_distances(pts)
 
     start_ts  = pts[0]["ts"]
-    end_ts    = pts[-1]["ts"]
-    dur_s     = (end_ts - start_ts).total_seconds()
+    dur_s     = (pts[-1]["ts"] - start_ts).total_seconds()
     total_km  = pts[-1]["dist_m"] / 1000
-
     if total_km < 0.5:
-        print("  Distanza < 0.5 km, skip."); return None
+        raise ValueError("Distanza < 0.5 km, skip.")
 
     hr_vals  = [p["hr"] for p in pts if p["hr"] is not None]
     avg_hr   = sum(hr_vals) / len(hr_vals) if hr_vals else None
     elev     = elevation_gain(pts)
     splits   = km_splits(pts)
 
-    # Sprint detection
     is_sprint, sprint_idx = detect_sprint(splits)
-    sprint_tail_s = 0
-    if is_sprint and sprint_idx is not None:
-        sprint_tail_s = int(splits[sprint_idx]["dur_s"])
+    sprint_tail_s = int(splits[sprint_idx]["dur_s"]) if is_sprint and sprint_idx is not None else 0
 
-    drift = cardiac_drift(pts, exclude_tail_s=sprint_tail_s)
-    pace_s = dur_s / total_km  # sec/km
+    drift  = cardiac_drift(pts, exclude_tail_s=sprint_tail_s)
+    pace_s = dur_s / total_km
     tss    = compute_tss(dur_s, avg_hr)
     ef     = compute_ef(total_km, dur_s, avg_hr)
 
-    # Weather
     first_gps_pt = next((p for p in pts if p.get("lat") and p.get("lon")), None)
-    weather = fetch_weather(first_gps_pt["lat"], first_gps_pt["lon"], start_ts) if first_gps_pt and FETCH_WEATHER else None
+    weather = fetch_weather(first_gps_pt["lat"], first_gps_pt["lon"], start_ts) if first_gps_pt and fetch else None
 
-    # ── Print session summary ─────────────────────────────────────────────
-    print(f"\n  Data:       {start_ts.strftime('%d/%m/%Y %H:%M')}")
-    print(f"  Distanza:   {total_km:.2f} km")
-    print(f"  Durata:     {format_hms(dur_s)}")
-    print(f"  Passo:      {format_pace(pace_s)}/km")
-    if avg_hr:
-        print(f"  FC media:   {avg_hr:.0f} bpm")
-    if ef:
-        status = "✓" if ef >= EF_BASELINE else "○"
-        print(f"  EF:         {ef:.3f} m/batt {status}")
-    if drift is not None:
-        note = "↑ deriva" if drift > DRIFT_HIGH else ("↓ fresco" if drift < DRIFT_LOW else "~")
-        suffix = " (escluso sprint)" if is_sprint else ""
-        print(f"  Drift:      {drift:.1f}% {note}{suffix}")
-    if tss:
-        print(f"  TSS:        {tss:.0f}")
-    print(f"  Dislivello: +{elev:.0f} m")
-
-    if weather:
-        w = weather
-        print(f"  Meteo:      {w['temp_c']:.1f}°C  {w['umidita_pct']:.0f}% umidità  {w['vento_kmh']:.0f} km/h vento")
-        if w["umidita_pct"] > 75:
-            print("  ⚠  Umidità >75%: termoregolazione compromessa")
-        if w["temp_c"] > 22:
-            print(f"  ⚠  Caldo ({w['temp_c']:.0f}°C): atteso rallentamento ~{int((w['temp_c']-18)*12)} sec/km")
-
-    if is_sprint and sprint_idx is not None:
-        sk = splits[sprint_idx]
-        print(f"\n  ⚡ Sprint finale rilevato (km {sk['km']}): {format_pace(sk['pace_s'])}/km")
-
-    # ── Per-km table ──────────────────────────────────────────────────────
-    print(f"\n  {'km':>4}  {'passo':>7}  {'FC':>5}  {'d+':>5}")
-    print(f"  {'─'*4}  {'─'*7}  {'─'*5}  {'─'*5}")
-    for i, s in enumerate(splits):
-        km_label = str(s["km"])
-        pace_str = format_pace(s["pace_s"])
-        hr_str   = f"{s['avg_hr']:.0f}" if s.get("avg_hr") else "  —"
-        el_str   = f"+{s['elev_gain']:.0f}m" if s["elev_gain"] > 0.5 else "   —"
-        flag     = " ⚡" if is_sprint and i == sprint_idx else ""
-        print(f"  {km_label:>4}  {pace_str:>7}  {hr_str:>5}  {el_str:>5}{flag}")
-
-    return {
+    session = {
         "data":         start_ts.strftime("%d/%m/%Y"),
         "orario":       start_ts.strftime("%H:%M"),
         "dist_km":      round(total_km, 2),
@@ -672,6 +647,58 @@ def analyze(filepath):
         "vento_kmh":    weather["vento_kmh"]   if weather else "",
         "gambe":        "",
     }
+    return {"session": session, "splits": splits, "is_sprint": is_sprint, "sprint_idx": sprint_idx,
+            "elev": elev, "avg_hr": avg_hr, "weather": weather, "start": start_ts, "dur_s": dur_s,
+            "total_km": total_km, "pace_s": pace_s, "ef": ef, "drift": drift, "tss": tss}
+
+
+def analyze(filepath):
+    """CLI wrapper: print the analysis, return the session dict (or None)."""
+    print(f"\n{'═'*60}")
+    print(f"  {os.path.basename(filepath)}")
+    print(f"{'═'*60}")
+    try:
+        r = analyze_file(filepath)
+    except ValueError as e:
+        print(f"  {e}")
+        return None
+
+    drift, is_sprint, sprint_idx, splits = r["drift"], r["is_sprint"], r["sprint_idx"], r["splits"]
+    print(f"\n  Data:       {r['start'].strftime('%d/%m/%Y %H:%M')}")
+    print(f"  Distanza:   {r['total_km']:.2f} km")
+    print(f"  Durata:     {format_hms(r['dur_s'])}")
+    print(f"  Passo:      {format_pace(r['pace_s'])}/km")
+    if r["avg_hr"]:
+        print(f"  FC media:   {r['avg_hr']:.0f} bpm")
+    if r["ef"]:
+        status = "✓" if r["ef"] >= EF_BASELINE else "○"
+        print(f"  EF:         {r['ef']:.3f} m/batt {status}")
+    if drift is not None:
+        note = "↑ deriva" if drift > DRIFT_HIGH else ("↓ fresco" if drift < DRIFT_LOW else "~")
+        suffix = " (escluso sprint)" if is_sprint else ""
+        print(f"  Drift:      {drift:.1f}% {note}{suffix}")
+    if r["tss"]:
+        print(f"  TSS:        {r['tss']:.0f}")
+    print(f"  Dislivello: +{r['elev']:.0f} m")
+
+    w = r["weather"]
+    if w:
+        print(f"  Meteo:      {w['temp_c']:.1f}°C  {w['umidita_pct']:.0f}% umidità  {w['vento_kmh']:.0f} km/h vento")
+        for msg in weather_warnings(w):
+            print(f"  ⚠  {msg}")
+
+    if is_sprint and sprint_idx is not None:
+        sk = splits[sprint_idx]
+        print(f"\n  ⚡ Sprint finale rilevato (km {sk['km']}): {format_pace(sk['pace_s'])}/km")
+
+    print(f"\n  {'km':>4}  {'passo':>7}  {'FC':>5}  {'d+':>5}")
+    print(f"  {'─'*4}  {'─'*7}  {'─'*5}  {'─'*5}")
+    for i, sp in enumerate(splits):
+        hr_str = f"{sp['avg_hr']:.0f}" if sp.get("avg_hr") else "  —"
+        el_str = f"+{sp['elev_gain']:.0f}m" if sp["elev_gain"] > 0.5 else "   —"
+        flag   = " ⚡" if is_sprint and i == sprint_idx else ""
+        print(f"  {str(sp['km']):>4}  {format_pace(sp['pace_s']):>7}  {hr_str:>5}  {el_str:>5}{flag}")
+    return r["session"]
 
 # ─── File discovery ───────────────────────────────────────────────────────────
 
@@ -679,10 +706,49 @@ def find_run_files(directory="."):
     pat = re.compile(r"^\d{4}\.\d{2}\.\d{2} \d{2}\.\d{2}-RUNNING\.csv$")
     return sorted(f for f in os.listdir(directory) if pat.match(f))
 
+
+def file_key(path):
+    st = filename_start(path)
+    return (st.strftime("%Y-%m-%d"), st.strftime("%H:%M")) if st else None
+
+
+def new_run_files(data_dir, history, reprocess_all=False):
+    """CSV paths in data_dir to process, and how many were skipped as already recorded."""
+    files = [os.path.join(data_dir, f) for f in find_run_files(data_dir)]
+    if reprocess_all:
+        return files, 0
+    known = {session_key(r) for r in history}
+    todo = [f for f in files if file_key(f) not in known]
+    return todo, len(files) - len(todo)
+
+
+def import_sessions(data_dir, fetch=True, reprocess_all=False):
+    """Analyse the CSVs not yet in the history. Does not save anything. Returns
+    {history, sessions (sorted), errors [(file, message)], skipped}."""
+    history = load_history(history_path(data_dir))
+    files, skipped = new_run_files(data_dir, history, reprocess_all)
+    sessions, errors = [], []
+    for fp in files:
+        try:
+            sessions.append(analyze_file(fp, fetch)["session"])
+        except ValueError as e:
+            errors.append((os.path.basename(fp), str(e)))
+    return {"history": history, "sessions": sorted(sessions, key=session_key),
+            "errors": errors, "skipped": skipped}
+
+
+def session_file(data_dir, row):
+    """Path of the CSV that belongs to a history row, or None."""
+    d, t = session_key(row)
+    for f in find_run_files(data_dir):
+        if file_key(f) == (d, t):
+            return os.path.join(data_dir, f)
+    return None
+
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 def main():
-    global FETCH_WEATHER, HISTORY_FILE
+    global FETCH_WEATHER
     args = sys.argv[1:]
     if "--no-weather" in args:
         FETCH_WEATHER = False
@@ -696,26 +762,19 @@ def main():
         del args[i:i + 2]
     if not os.path.isdir(data_dir):
         sys.exit(f"Cartella dati non trovata: {data_dir}")
-    HISTORY_FILE = os.path.join(data_dir, HISTORY_FILE)
+    hist_file = history_path(data_dir)
     reprocess_all = "--all" in args
     args = [a for a in args if a != "--all"]
-    history = load_history()
+    history = load_history(hist_file)
     if args:
         files = args
     else:
-        files = [os.path.join(data_dir, f) for f in find_run_files(data_dir)]
-        if not reprocess_all:
-            known = {session_key(r) for r in history}
-            def file_key(fp):
-                st = filename_start(fp)
-                return (st.strftime("%Y-%m-%d"), st.strftime("%H:%M")) if st else None
-            skipped = sum(file_key(f) in known for f in files)
-            files = [f for f in files if file_key(f) not in known]
-            if skipped:
-                print(f"{skipped} sessioni già nello storico, saltate (usa --all per rielaborarle).")
+        files, skipped = new_run_files(data_dir, history, reprocess_all)
+        if skipped:
+            print(f"{skipped} sessioni già nello storico, saltate (usa --all per rielaborarle).")
 
     if not files and history:
-        save_history(history)
+        save_history(history, hist_file)
         print("Nessuna sessione nuova.")
         return
     if not files:
@@ -723,23 +782,14 @@ def main():
         print("Uso: python parse_run_csv.py [--data CARTELLA] [--no-weather] [--all] [file.csv ...]")
         sys.exit(1)
 
-    sessions = []
-
-    for fp in files:
-        sess = analyze(fp)
-        if sess:
-            sessions.append(sess)
-
+    sessions = [s for s in (analyze(fp) for fp in files) if s]
     if not sessions:
         print("\nNessuna sessione analizzata.")
         return
-
     print(f"\n{len(sessions)} sessione/i analizzata/e.")
 
     sessions.sort(key=session_key)
-    for sess in sessions:
-        history = upsert(history, sess)
-    history.sort(key=session_key)
+    history = merge_sessions(history, sessions)
 
     last = sessions[-1]
     latest = is_latest(history, last)
@@ -747,8 +797,8 @@ def main():
         legs = get_leg_condition()
         last["gambe"] = legs
 
-    save_history(history)
-    print(f"\n  ✓ Storico aggiornato: {HISTORY_FILE} ({len(history)} sessioni)")
+    save_history(history, hist_file)
+    print(f"\n  ✓ Storico aggiornato: {hist_file} ({len(history)} sessioni)")
 
     if latest:
         recommendations(history, last, legs)
