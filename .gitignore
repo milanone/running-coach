@@ -1,3 +1,12 @@
 *.csv
 __pycache__/
 *.pyc
+
+# Personal data and local files — never commit
+*.tcx
+*.fit
+*.gpx
+running_history.csv
+*.local-backup.py
+.claude/
+howto.txt
