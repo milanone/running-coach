@@ -26,6 +26,12 @@ class ParseRunTests(unittest.TestCase):
         self.assertIsNotNone(pts[-1]["alt"])
         self.assertTrue(P.detect_sprint(splits)[0])
 
+    def test_elevation_gain_counts_slow_climb_below_per_sample_threshold(self):
+        pts = [{"alt": 100 + 0.1 * i} for i in range(101)]
+        self.assertAlmostEqual(P.elevation_gain(pts), 10.0, delta=0.6)
+        flat_noise = [{"alt": 100 + (0.2 if i % 2 else 0)} for i in range(100)]
+        self.assertEqual(P.elevation_gain(flat_noise), 0.0)
+
     def test_splits(self):
         _, splits = load(km=6.0)
         self.assertGreaterEqual(len(splits), 5)

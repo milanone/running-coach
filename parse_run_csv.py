@@ -206,14 +206,24 @@ def compute_distances(pts):
 
 # ─── Elevation gain ───────────────────────────────────────────────────────────
 
+def climb_step(anchor, alt):
+    """Hysteresis: count a climb only once altitude moves more than NOISE_ELEV_M away from
+    the last reference point (per-sample deltas at 1 Hz are always below the threshold)."""
+    if anchor is None:
+        return 0.0, alt
+    if alt - anchor > NOISE_ELEV_M:
+        return alt - anchor, alt
+    if anchor - alt > NOISE_ELEV_M:
+        return 0.0, alt
+    return 0.0, anchor
+
+
 def elevation_gain(pts):
-    gain = 0.0
-    prev = None
+    gain, anchor = 0.0, None
     for p in pts:
         if p["alt"] is not None:
-            if prev is not None and (p["alt"] - prev) > NOISE_ELEV_M:
-                gain += p["alt"] - prev
-            prev = p["alt"]
+            g, anchor = climb_step(anchor, p["alt"])
+            gain += g
     return gain
 
 # ─── Per-km splits ────────────────────────────────────────────────────────────
@@ -241,9 +251,8 @@ def km_splits(pts):
             hr_n   += 1
 
         if p["alt"] is not None:
-            if prev_alt is not None and (p["alt"] - prev_alt) > NOISE_ELEV_M:
-                dplus += p["alt"] - prev_alt
-            prev_alt = p["alt"]
+            g, prev_alt = climb_step(prev_alt, p["alt"])
+            dplus += g
 
         if d >= km_num * 1000:
             dur = (p["ts"] - t0).total_seconds()
