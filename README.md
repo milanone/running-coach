@@ -96,3 +96,7 @@ Keep your own data files out of version control.
 
 Python 3, standard library only. The GUI needs Tkinter, which ships with the standard Python
 installer on Windows and macOS (Linux: `sudo apt install python3-tk`).
+
+## License
+
+[MIT](LICENSE)
