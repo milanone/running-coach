@@ -9,8 +9,9 @@ Console output and the history column names are in Italian.
 ## Metrics
 
 - **Efficiency Factor (EF)** — metres covered per heartbeat-per-minute (`distance_m / (avg_hr × minutes)`); higher means better aerobic efficiency.
-- **Cardiac drift** — how much heart rate rises relative to pace over the session (%); a high
-  value points to fatigue, heat or dehydration.
+- **Cardiac drift** — how much average heart rate rises from the first to the second half of the
+  steady part of the run (%). The first 10 minutes (`WARMUP_S`) and an auto-detected final-km
+  sprint are excluded. A high value points to fatigue, heat or dehydration.
 - **TSS** — a training-stress score from duration and heart rate relative to threshold.
 - **Elevation** — ascent/descent with a GPS-noise filter.
 
@@ -48,6 +49,7 @@ Personal parameters are constants at the top of the script. Edit them to match y
 | `THRESHOLD_HR` | Lactate-threshold heart rate (bpm) |
 | `EF_BASELINE` | Baseline efficiency (m/beat) used as a reference |
 | `FETCH_WEATHER` | Query Open-Meteo for weather (`--no-weather` disables it) |
+| `WARMUP_S` | Seconds excluded from the start when computing cardiac drift |
 | `NOISE_ELEV_M` | Elevation changes below this are ignored as GPS noise |
 | `SPRINT_PACE_S`, `SPRINT_HR_BPM` | How much faster / higher than the median flags a sprint |
 

@@ -55,6 +55,14 @@ class ParseRunTests(unittest.TestCase):
         self.assertGreater(with_sprint, without + 2)
         self.assertLess(without, 3)
 
+    def test_drift_ignores_warmup_ramp(self):
+        import datetime as dt
+        t0 = dt.datetime(2026, 5, 7, 7, 0, 0)
+        pts = [{"ts": t0 + dt.timedelta(seconds=i),
+                "hr": 110 + 0.05 * i if i < 600 else 140.0} for i in range(2400)]
+        self.assertGreater(P.cardiac_drift(pts, warmup_s=0), 5)
+        self.assertAlmostEqual(P.cardiac_drift(pts), 0.0, places=1)
+
     def test_no_sprint_on_steady_run(self):
         _, splits = load(km=6.0)
         self.assertFalse(P.detect_sprint(splits)[0])

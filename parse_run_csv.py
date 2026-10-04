@@ -25,6 +25,7 @@ EF_BASELINE     = 0.92   # m/beat baseline (good aerobic efficiency)
 NOISE_ELEV_M    = 0.5    # ignore elevation deltas below this (GPS noise filter)
 SPRINT_PACE_S   = 15     # sec/km faster than median to flag sprint
 SPRINT_HR_BPM   = 5      # bpm above median to confirm sprint
+WARMUP_S        = 600    # warm-up excluded from cardiac drift (capped at 25% of the run)
 FETCH_WEATHER   = True   # False or --no-weather: no coordinates sent to Open-Meteo
 HISTORY_FILE    = "running_history.csv"
 HISTORY_FIELDS  = [
@@ -369,15 +370,19 @@ def detect_sprint(splits):
 
 # ─── Cardiac drift ────────────────────────────────────────────────────────────
 
-def cardiac_drift(pts, exclude_tail_s=0):
+def cardiac_drift(pts, exclude_tail_s=0, warmup_s=None):
     """
-    HR drift = (avg_hr second half – avg_hr first half) / first_half × 100
-    Excludes the last `exclude_tail_s` seconds (sprint segment).
+    HR drift = (avg_hr second half – avg_hr first half) / first_half × 100, computed on the
+    steady part of the run: the first `warmup_s` seconds (HR still rising from rest) and the
+    last `exclude_tail_s` seconds (sprint segment) are left out.
     """
-    work = pts
-    if exclude_tail_s > 0:
-        cutoff = pts[-1]["ts"] - timedelta(seconds=exclude_tail_s)
-        work = [p for p in pts if p["ts"] <= cutoff]
+    if warmup_s is None:
+        warmup_s = WARMUP_S
+    t0 = pts[0]["ts"]
+    total = (pts[-1]["ts"] - t0).total_seconds()
+    start = t0 + timedelta(seconds=min(warmup_s, 0.25 * total))
+    end = pts[-1]["ts"] - timedelta(seconds=exclude_tail_s)
+    work = [p for p in pts if start <= p["ts"] <= end]
 
     hr_pts = [p["hr"] for p in work if p["hr"] is not None]
     if len(hr_pts) < 10:
