@@ -68,6 +68,37 @@ class ParseRunTests(unittest.TestCase):
         self.assertFalse(P.is_latest(hist, hist[0]))
         self.assertTrue(P.is_latest(hist, hist[1]))
 
+    def test_history_mixed_formats_collapse_sort_and_keep_weather(self):
+        header = ",".join(P.HISTORY_FIELDS)
+        lines = [
+            header,
+            "01/06/2026,07:05,4.51,00:33:39,07:27,139,0.964,12.99,37,20.8,65,6.2,ok",
+            "07/05/2026,07:51,4.80,00:42:00,08:45,135,0.85,5.0,45,18.0,60,5.0,ok",
+            "29/04/2026,18:47,4.05,00:33:03,08:09,132,0.923,2.93,33,22.1,37,15.8,",
+            "2026-05-07,07:51,4.82,42:11,525.0,135,0.849,1.7,47,,,,fresche",
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            old = P.HISTORY_FILE
+            P.HISTORY_FILE = os.path.join(d, "h.csv")
+            try:
+                with open(P.HISTORY_FILE, "w", newline="") as f:
+                    f.write("\n".join(lines))
+                rows = P.load_history()
+            finally:
+                P.HISTORY_FILE = old
+        self.assertEqual([r["data"] for r in rows], ["29/04/2026", "07/05/2026", "01/06/2026"])
+        may7 = rows[1]
+        self.assertEqual(may7["dist_km"], "4.82")
+        self.assertEqual(may7["temp_c"], "18.0")
+        self.assertEqual(may7["durata_hms"], "00:42:11")
+        self.assertEqual(may7["passo_minkm"], "08:45")
+        self.assertEqual(may7["gambe"], "ok")
+
+    def test_pace_and_duration_formats(self):
+        self.assertEqual(P.pace_csv(447), "07:27")
+        self.assertEqual(P.hms_csv(2019), "00:33:39")
+        self.assertEqual(P.parse_pace("07:27"), 447)
+
     def test_ef_and_tss(self):
         self.assertAlmostEqual(P.compute_ef(5.0, 2250, 155), 5000 / (155 * 37.5), places=3)
         self.assertAlmostEqual(P.compute_tss(3600, P.THRESHOLD_HR), 100.0, places=1)

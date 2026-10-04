@@ -58,6 +58,46 @@ def format_hms(seconds):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+def hms_csv(seconds):
+    h, rem = divmod(int(seconds), 3600)
+    return f"{h:02d}:{rem // 60:02d}:{rem % 60:02d}"
+
+
+def pace_csv(sec_per_km):
+    m, sec = divmod(int(round(sec_per_km)), 60)
+    return f"{m:02d}:{sec:02d}"
+
+
+def parse_pace(v):
+    """'07:27' -> 447.0; a plain number is taken as seconds/km."""
+    v = (v or "").strip() if isinstance(v, str) else v
+    if isinstance(v, str) and ":" in v:
+        m, _, sec = v.partition(":")
+        try:
+            return int(m) * 60 + float(sec)
+        except ValueError:
+            return None
+    return safe_float(v)
+
+
+def date_iso(s):
+    s = (s or "").strip()
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return s
+
+
+def date_it(s):
+    iso = date_iso(s)
+    try:
+        return datetime.strptime(iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        return s
+
+
 def safe_float(v):
     try:
         f = float(v)
@@ -329,7 +369,7 @@ def cardiac_drift(pts, exclude_tail_s=0):
     mid = len(hr_pts) // 2
     h1  = sum(hr_pts[:mid]) / mid
     h2  = sum(hr_pts[mid:]) / (len(hr_pts) - mid)
-    return round((h2 - h1) / h1 * 100, 1)
+    return round((h2 - h1) / h1 * 100, 2)
 
 # ─── TSS and EF ──────────────────────────────────────────────────────────────
 
@@ -377,11 +417,48 @@ def fetch_weather(lat, lon, dt):
 
 # ─── History I/O ─────────────────────────────────────────────────────────────
 
+def session_key(r):
+    return (date_iso(r.get("data", "")), (r.get("orario") or "").strip())
+
+
+def upsert(records, rec, keep_old_legs=False):
+    """Deduplicate by (date, time) across date formats; the new record wins, but fields it
+    leaves empty (weather, `gambe`) keep the previously recorded value. With keep_old_legs the
+    recorded `gambe` always survives (used when merging duplicates already in the file)."""
+    for i, r in enumerate(records):
+        if session_key(r) == session_key(rec):
+            for k in HISTORY_FIELDS:
+                if rec.get(k) in ("", None) or (k == "gambe" and keep_old_legs and r.get(k)):
+                    rec[k] = r.get(k, "")
+            records[i] = rec
+            return records
+    records.append(rec)
+    return records
+
+
+def normalize_row(r):
+    r = {k: (r.get(k) or "").strip() for k in HISTORY_FIELDS}
+    r["data"] = date_it(r["data"])
+    if r["durata_hms"].count(":") == 1:
+        r["durata_hms"] = "00:" + r["durata_hms"]
+    pace = parse_pace(r["passo_minkm"])
+    if pace:
+        r["passo_minkm"] = pace_csv(pace)
+    return r
+
+
 def load_history():
+    """Read the history in any mix of date formats; collapse duplicate sessions (rows written
+    in ISO format by newer runs win over older dd/mm/yyyy rows) and sort chronologically."""
     if not os.path.exists(HISTORY_FILE):
         return []
-    with open(HISTORY_FILE, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+    with open(HISTORY_FILE, newline="", encoding="utf-8-sig") as f:
+        raw = list(csv.DictReader(f))
+    raw.sort(key=lambda r: bool(re.match(r"\d{4}-\d{2}-\d{2}", (r.get("data") or "").strip())))
+    out = []
+    for r in raw:
+        upsert(out, normalize_row(r), keep_old_legs=True)
+    return sorted(out, key=session_key)
 
 
 def save_history(records):
@@ -389,22 +466,6 @@ def save_history(records):
         w = csv.DictWriter(f, fieldnames=HISTORY_FIELDS, extrasaction="ignore")
         w.writeheader()
         w.writerows(records)
-
-
-def session_key(r):
-    return (r.get("data", ""), r.get("orario", ""))
-
-
-def upsert(records, rec):
-    """Deduplicate by (data, orario); overwrite if same session, keeping its recorded `gambe`."""
-    for i, r in enumerate(records):
-        if session_key(r) == session_key(rec):
-            if not rec.get("gambe"):
-                rec["gambe"] = r.get("gambe", "")
-            records[i] = rec
-            return records
-    records.append(rec)
-    return records
 
 
 def is_latest(history, rec):
@@ -438,7 +499,7 @@ def recommendations(history, session, legs):
     drift = safe_float(session.get("drift_pct"))
     tss   = safe_float(session.get("tss")) or 0
     dist  = safe_float(session.get("dist_km")) or 5.0
-    pace  = safe_float(session.get("passo_minkm")) or 390
+    pace  = session.get("_pace_s") or parse_pace(session.get("passo_minkm")) or 390
 
     # Rest days
     rest = 1
@@ -568,15 +629,16 @@ def analyze(filepath):
         print(f"  {km_label:>4}  {pace_str:>7}  {hr_str:>5}  {el_str:>5}{flag}")
 
     return {
-        "data":         start_ts.strftime("%Y-%m-%d"),
+        "data":         start_ts.strftime("%d/%m/%Y"),
         "orario":       start_ts.strftime("%H:%M"),
         "dist_km":      round(total_km, 2),
-        "durata_hms":   format_hms(dur_s),
-        "passo_minkm":  round(pace_s, 1),
+        "durata_hms":   hms_csv(dur_s),
+        "passo_minkm":  pace_csv(pace_s),
+        "_pace_s":      pace_s,
         "fc_media_bpm": round(avg_hr) if avg_hr else "",
         "ef_m_batt":    ef if ef is not None else "",
         "drift_pct":    drift if drift is not None else "",
-        "tss":          tss if tss is not None else "",
+        "tss":          round(tss) if tss is not None else "",
         "temp_c":       weather["temp_c"]      if weather else "",
         "umidita_pct":  weather["umidita_pct"] if weather else "",
         "vento_kmh":    weather["vento_kmh"]   if weather else "",
