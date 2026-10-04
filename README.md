@@ -1,13 +1,8 @@
 # running-coach
 
-Command-line analyzers for running sessions. They read an activity export, compute a few
-training-load metrics, and keep a local history so each new session can be compared with the
-previous ones.
-
-| Script | Input | Notes |
-|---|---|---|
-| `parse_run_csv.py` | CSV exported from [intervals.icu](https://intervals.icu) | Main tool: per-km table, session metrics, weather, sprint detection, recommendations |
-| `parse_run_fit.py` | `.fit` activity file | Simpler, earlier tool: per-km table and a traffic-light health status |
+Command-line analyzer for running sessions exported from [intervals.icu](https://intervals.icu).
+It reads the activity CSV, computes a few training-load metrics, and keeps a local history so
+each new session can be compared with the previous ones.
 
 Console output and the history column names are in Italian.
 
@@ -17,10 +12,9 @@ Console output and the history column names are in Italian.
 - **Cardiac drift** — how much heart rate rises relative to pace over the session (%); a high
   value points to fatigue, heat or dehydration.
 - **TSS** — a training-stress score from duration and heart rate relative to threshold.
-- **Elevation** — ascent/descent with a GPS-noise filter, used to judge whether a high drift is
-  explained by the slope.
+- **Elevation** — ascent/descent with a GPS-noise filter.
 
-## parse_run_csv.py
+## Usage
 
 ```
 python parse_run_csv.py                  # process every "YYYY.MM.DD HH.MM-RUNNING.csv" in the folder
@@ -34,7 +28,8 @@ python parse_run_csv.py "file.csv"       # process a single file
    in the recommendations for the next session.
 
 It prints a per-km breakdown, EF, cardiac drift, TSS, automatic sprint detection (final km)
-and recommendations, then appends or updates the session in `running_history.csv`.
+and recommendations for the next session (rest days, distance, pace), then appends or updates
+the session in `running_history.csv`.
 
 **Weather lookup.** For each session it queries the
 [Open-Meteo](https://open-meteo.com) historical API with the **start coordinates** of the
@@ -42,31 +37,16 @@ activity to record temperature, humidity and wind. If the request fails the scri
 without weather data. Remove the call to `fetch_weather()` if you do not want coordinates sent
 to an external service.
 
-## parse_run_fit.py
-
-```
-pip install fitparse
-python parse_run_fit.py "activity.fit"
-```
-
-Prints a per-km table with pace, heart rate and elevation change, session metrics, and a
-traffic-light status (green / yellow / orange / red) that turns red after three consecutive
-sessions with cardiac drift above 15%.
-
-**Separate history file.** This script writes its own simple log (`timestamp,drift,EF` per line)
-to `running_history.csv`, a different format from the one `parse_run_csv.py` produces.
-Use the two scripts in different folders, or change `LOG_FILE` in one of them, otherwise they
-will not read each other's history correctly.
-
 ## Configuration
 
-Personal parameters are constants at the top of each script. Edit them to match your own values:
+Personal parameters are constants at the top of the script. Edit them to match your own values:
 
 | Constant | Meaning |
 |---|---|
-| `FC_MAX`, `FC_REST`, `LTHR` (`.fit` script) | Maximum, resting and threshold heart rate (bpm) |
-| `THRESHOLD_HR`, `EF_BASELINE` (CSV script) | Threshold heart rate and baseline efficiency |
-| `SPRINT_PACE_S`, `SPRINT_HR_BPM` (CSV script) | How much faster / higher than the median flags a sprint |
+| `THRESHOLD_HR` | Lactate-threshold heart rate (bpm) |
+| `EF_BASELINE` | Baseline efficiency (m/beat) used as a reference |
+| `NOISE_ELEV_M` | Elevation changes below this are ignored as GPS noise |
+| `SPRINT_PACE_S`, `SPRINT_HR_BPM` | How much faster / higher than the median flags a sprint |
 
 ## Privacy
 
@@ -76,6 +56,4 @@ Keep your own data files out of version control.
 
 ## Requirements
 
-- Python 3
-- `parse_run_csv.py`: standard library only
-- `parse_run_fit.py`: [`fitparse`](https://pypi.org/project/fitparse/)
+Python 3, standard library only.
