@@ -50,6 +50,15 @@ Personal parameters are constants at the top of the script. Edit them to match y
 | `NOISE_ELEV_M` | Elevation changes below this are ignored as GPS noise |
 | `SPRINT_PACE_S`, `SPRINT_HR_BPM` | How much faster / higher than the median flags a sprint |
 
+## Tests
+
+```
+python -m unittest discover -s tests -v
+```
+
+`tests/synth.py` generates synthetic intervals.icu-style CSVs (doubled Samsung distance, GPS lockup
+at the start, optional final-km sprint), so the logic can be checked without real data.
+
 ## Privacy
 
 This repository contains code only. `.gitignore` excludes `*.csv`, `*.fit`, `*.tcx`, `*.gpx`
