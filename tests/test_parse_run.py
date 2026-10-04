@@ -8,9 +8,9 @@ from synth import write_run
 
 def load(**kw):
     with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "run.csv")
+        path = os.path.join(d, "2026.05.07 07.51-RUNNING.csv")
         write_run(path, **kw)
-        pts = P.compute_distances(P.extract_points(P.load_csv(path)))
+        pts = P.compute_distances(P.extract_points(P.load_csv(path), P.filename_start(path)))
     return pts, P.km_splits(pts)
 
 
@@ -18,6 +18,13 @@ class ParseRunTests(unittest.TestCase):
     def test_distance_ignores_doubled_samsung_field_and_gps_lockup(self):
         pts, _ = load(km=6.0)
         self.assertAlmostEqual(pts[-1]["dist_m"] / 1000, 6.0, delta=0.05)
+
+    def test_intervals_icu_format_elapsed_seconds_and_fixed_altitude(self):
+        pts, splits = load(km=6.0, sprint=True, icu_format=True)
+        self.assertAlmostEqual(pts[-1]["dist_m"] / 1000, 6.0, delta=0.05)
+        self.assertEqual(pts[0]["ts"].strftime("%H:%M"), "07:51")
+        self.assertIsNotNone(pts[-1]["alt"])
+        self.assertTrue(P.detect_sprint(splits)[0])
 
     def test_splits(self):
         _, splits = load(km=6.0)

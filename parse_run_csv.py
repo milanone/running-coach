@@ -97,22 +97,41 @@ def load_csv(path):
     return [{k.lower().strip(): (v or "").strip() for k, v in row.items()} for row in rows]
 
 
-def extract_points(rows):
+def pick_col(rows, *candidates):
+    """First candidate column that exists AND holds at least one value."""
+    for c in candidates:
+        if c in rows[0] and any(r.get(c) for r in rows):
+            return c
+    return None
+
+
+def filename_start(path):
+    m = re.match(r"(\d{4})\.(\d{2})\.(\d{2}) (\d{2})\.(\d{2})", os.path.basename(path))
+    return datetime(*map(int, m.groups())) if m else None
+
+
+def extract_points(rows, start=None):
+    """`time` may be an ISO timestamp or elapsed seconds (intervals.icu); for the latter
+    the start datetime comes from `start` (the filename)."""
     if not rows:
         return []
-    s = rows[0]
-    ts_col   = first_key(s, "time", "timestamp", "datetime", "date")
-    lat_col  = first_key(s, "lat", "latitude")
-    lon_col  = first_key(s, "lon", "lng", "longitude")
-    alt_col  = first_key(s, "altitude", "alt", "elevation")
-    hr_col   = first_key(s, "heart_rate", "hr", "heartrate", "bpm")
-    dist_col = first_key(s, "distance", "dist", "cum_distance", "cumulative_distance")
+    ts_col   = pick_col(rows, "time", "timestamp", "datetime", "date")
+    lat_col  = pick_col(rows, "lat", "latitude")
+    lon_col  = pick_col(rows, "lng", "lon", "longitude")
+    alt_col  = pick_col(rows, "fixed_altitude", "altitude", "alt", "elevation")
+    hr_col   = pick_col(rows, "heartrate", "heart_rate", "hr", "bpm")
+    dist_col = pick_col(rows, "distance", "dist", "cum_distance", "cumulative_distance")
+    base = start or datetime(2000, 1, 1)
 
     pts = []
     for row in rows:
-        ts = parse_ts(row.get(ts_col, "")) if ts_col else None
+        raw = row.get(ts_col, "") if ts_col else ""
+        ts = parse_ts(raw)
         if ts is None:
-            continue
+            secs = safe_float(raw)
+            if secs is None:
+                continue
+            ts = base + timedelta(seconds=secs)
         pts.append({
             "ts":   ts,
             "lat":  safe_float(row.get(lat_col,  "")) if lat_col  else None,
@@ -455,7 +474,7 @@ def analyze(filepath):
     if not rows:
         print("  File vuoto."); return None
 
-    pts = extract_points(rows)
+    pts = extract_points(rows, filename_start(filepath))
     if len(pts) < 5:
         print("  Troppo pochi punti."); return None
 
