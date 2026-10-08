@@ -10,3 +10,5 @@ running_history.csv
 *.local-backup.py
 .claude/
 howto.txt
+example data/
+*.lnk

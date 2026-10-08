@@ -36,19 +36,19 @@ class GuiSmokeTests(unittest.TestCase):
             try:
                 app.fetch.set(False)
                 asked = []
-                app.ask_legs = lambda text: (asked.append(text), "pesanti")[1]
+                app.ask_legs = lambda text: (asked.append(text), "heavy")[1]
                 app.update()
                 app.import_now()
                 app.update()
 
                 self.assertEqual(len(asked), 1)
                 self.assertEqual(len(app.tree.get_children()), 3)
-                self.assertIn("pesanti", open(os.path.join(d, "running_history.csv")).read())
+                self.assertIn("heavy", open(os.path.join(d, "running_history.csv")).read())
 
                 app.tree.selection_set(app.tree.get_children()[1])
                 app.update()
                 self.assertGreaterEqual(len(app.splits.get_children()), 4)
-                self.assertIn("Sprint", app.detail.get("1.0", "end"))
+                self.assertIn("Final sprint", app.detail.get("1.0", "end"))
 
                 app.tabs.select(1)
                 app.update()
@@ -59,27 +59,27 @@ class GuiSmokeTests(unittest.TestCase):
                 app.sort_by("dist_km")
                 self.assertEqual(km(), ["6.0", "5.0", "4.0"])
                 self.assertIn("▼", app.tree.heading("dist_km")["text"])
-                app.sort_by("gambe")
-                self.assertEqual(app.tree.set(app.tree.get_children()[0], "gambe"), "pesanti")
-                app.sort_by("gambe")
-                self.assertEqual(app.tree.set(app.tree.get_children()[0], "gambe"), "pesanti")
-                self.assertEqual(app.tree.set(app.tree.get_children()[-1], "gambe"), "")
-                app.sort_by("data")
-                self.assertEqual(app.tree.set(app.tree.get_children()[0], "data"), "15/05/2026")
-                app.sort_by("data")
-                app.sort_by("data")
+                app.sort_by("legs")
+                self.assertEqual(app.tree.set(app.tree.get_children()[0], "legs"), "heavy")
+                app.sort_by("legs")
+                self.assertEqual(app.tree.set(app.tree.get_children()[0], "legs"), "heavy")
+                self.assertEqual(app.tree.set(app.tree.get_children()[-1], "legs"), "")
+                app.sort_by("date")
+                self.assertEqual(app.tree.set(app.tree.get_children()[0], "date"), "15/05/2026")
+                app.sort_by("date")
+                app.sort_by("date")
                 for label, *_ in gui.METRICS:
                     app.metric.set(label)
                     app.draw_chart()
                 self.assertTrue(app.canvas.find_all())
 
-                app.legs_var.set("dolenti")
+                app.legs_var.set("sore")
                 app.save_legs()
-                self.assertEqual(app.selected_row()["gambe"], "dolenti")
+                self.assertEqual(app.selected_row()["legs"], "sore")
                 self.assertNotEqual(app.reco_vars["dist"].get(), "—")
 
                 app.import_now()
-                self.assertIn("0 sessioni importate, 3 già presenti", app.status.get())
+                self.assertIn("0 sessions imported, 3 already present", app.status.get())
             finally:
                 app._close()
             self.assertEqual(json.load(open(cfg))["data_dir"], d)
@@ -89,9 +89,9 @@ class GuiSmokeTests(unittest.TestCase):
         root = tkinter.Tk()
         try:
             dlg = gui.LegsDialog(root, "?", default="ok")
-            dlg.var.set("fresche")
+            dlg.var.set("fresh")
             dlg._ok()
-            self.assertEqual(dlg.choice, "fresche")
+            self.assertEqual(dlg.choice, "fresh")
         finally:
             root.destroy()
 

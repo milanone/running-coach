@@ -1,0 +1,1 @@
+# Standard library only: nothing to install (the GUI needs Tkinter, bundled with the Windows/macOS Python).
