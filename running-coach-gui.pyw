@@ -88,7 +88,7 @@ class App(tk.Tk):
         entry.bind("<Return>", lambda e: self.reload())
         ttk.Button(bar, text="Browse…", command=self.browse).pack(side="left")
         ttk.Checkbutton(bar, text="Online weather", variable=self.fetch).pack(side="left", padx=10)
-        self.btn_import = ttk.Button(bar, text="Import new runs", command=self.start_import)
+        self.btn_import = ttk.Button(bar, text="Import local CSVs (legacy)", command=self.start_import)
         self.btn_import.pack(side="left")
         self.btn_all = ttk.Button(bar, text="Reprocess all", command=self.reprocess_all)
         self.btn_all.pack(side="left", padx=(6, 0))

@@ -31,7 +31,7 @@ it is remembered in `~/.running_coach_gui.json`), then:
   (running only, saved as `YYYY.MM.DD HH.MM-RUNNING.csv`) and then imports them. It needs your intervals.icu API key
   (Settings → Developer Settings): put it in `intervals_api_key.txt` next to the program (gitignored) or in the
   `INTERVALS_API_KEY` environment variable. From the command line: `py parse_run_csv.py --download [--since YYYY-MM-DD]`.
-- **Import new runs** analyses only the CSVs not yet in the history. **Reprocess all**
+- **Import local CSVs (legacy)** analyses only the CSVs already in the folder and not yet in the history (no download). **Reprocess all**
   recomputes every session (the weather already recorded is kept).
 - **History** lists all sessions; select one to see the per-km splits, sprint note and weather.
 - **Charts** plots distance, pace, heart rate, EF, drift or TSS over time with a 3-session moving average.
