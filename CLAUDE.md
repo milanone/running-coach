@@ -52,6 +52,15 @@ have a bad GPS start; intervals.icu already "cooks" the distance. Gotchas: a `Us
 excluded from the Drive mirror in `mirror_to_drive.bat`; never print it). Tests mock `intervals_get`; no test touches the network.
 Verified live on 2026-10-13: 37 runs listed since April, 16 identical to the existing files, 21 new (June-October).
 
+## Merged outings
+
+`merged_sessions.json` in the data folder (`merged_members()`) maps a primary session to the ones recorded after a pause; `analyze_file`
+joins their points with `concat_runs()`: later parts are shifted in time (the pause must not count, `km_splits` works on timestamp
+differences) and their distance continues from the previous total. `new_run_files` skips the members and recomputes the primary
+while any member row is still in the history; `load_folder_history` drops member rows. The file lives in the private data repo. First case:
+the three sessions of 2026-08-18 (3.07 + 1.90 + 1.05 km, pauses of 12 and 1.5 min), decided by Francesco as one outing: 6.02 km in 52:00.
+The rule for what to merge is manual on purpose (no automatic "same day, short pause" heuristic: it could join a run and a walk).
+
 ## History file format
 
 Columns (`HISTORY_FIELDS`): `date` (dd/mm/yyyy), `time`, `dist_km`, `duration_hms`, `pace_minkm`, `avg_hr_bpm`,

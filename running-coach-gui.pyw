@@ -183,7 +183,7 @@ class App(tk.Tk):
 
     def reload(self):
         d = self._dir()
-        self.history = core.load_history(core.history_path(d)) if d else []
+        self.history = core.load_folder_history(d) if d else []
         if d:
             self._save_config()
         for b in (self.btn_import, self.btn_all, self.btn_download):

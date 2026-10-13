@@ -208,6 +208,27 @@ class ParseRunTests(unittest.TestCase):
             if old is not None:
                 os.environ["INTERVALS_API_KEY"] = old
 
+    def test_sessions_merged_into_one_outing(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_run(os.path.join(d, "2026.08.18 16.45-RUNNING.csv"), km=3.0, icu_format=True)
+            write_run(os.path.join(d, "2026.08.18 17.21-RUNNING.csv"), km=2.0, icu_format=True)
+            solo = P.analyze_file(os.path.join(d, "2026.08.18 16.45-RUNNING.csv"), fetch=False)
+            with open(os.path.join(d, P.MERGE_FILE), "w") as f:
+                json.dump({"2026.08.18 16.45": ["2026.08.18 17.21"]}, f)
+            # a history from before the merge still holds both sessions
+            rows = [dict(date="18/08/2026", time="16:45", dist_km="3.0"), dict(date="18/08/2026", time="17:21", dist_km="2.0")]
+            P.save_history([P.normalize_row(r) for r in rows], P.history_path(d))
+            res = P.import_sessions(d, fetch=False)
+            self.assertEqual([s["time"] for s in res["sessions"]], ["16:45"])      # the primary is recomputed
+            self.assertEqual([r["time"] for r in res["history"]], ["16:45"])       # the member row is dropped
+            s = res["sessions"][0]
+            self.assertAlmostEqual(s["dist_km"], 5.0, delta=0.05)
+            self.assertAlmostEqual(solo["dur_s"] * 5 / 3, P.safe_float(s["duration_hms"][:2]) * 3600
+                                   + P.safe_float(s["duration_hms"][3:5]) * 60 + P.safe_float(s["duration_hms"][6:]), delta=15)
+            P.save_history(P.merge_sessions(res["history"], res["sessions"]), P.history_path(d))
+            again = P.import_sessions(d, fetch=False)
+            self.assertEqual((len(again["sessions"]), len(again["history"])), (0, 1))   # stable on the next import
+
     def test_ef_and_tss(self):
         self.assertAlmostEqual(P.compute_ef(5.0, 2250, 155), 5000 / (155 * 37.5), places=3)
         self.assertAlmostEqual(P.compute_tss(3600, P.THRESHOLD_HR), 100.0, places=1)

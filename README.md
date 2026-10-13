@@ -64,6 +64,14 @@ activity to record temperature, humidity and wind. If the request fails the scri
 without weather data. Pass `--no-weather` (or set `FETCH_WEATHER = False`) if you do not want coordinates sent
 to an external service.
 
+## Outings recorded as several sessions
+
+If a run was recorded as several sessions (the recording restarted after a pause), list them in `merged_sessions.json`
+in the data folder, the first one as the key: `{"2026.08.18 16.45": ["2026.08.18 17.21", "2026.08.18 17.38"]}`.
+They are then analysed as one session starting at the first: distances and moving times add up (the pause is not
+counted), and the member sessions disappear from the history. Their CSVs stay in the folder so a download does not
+fetch them again. Run **Import local CSVs (legacy)** (or the download button) once to apply it.
+
 ## The history file
 
 `running_history.csv` has one row per session with the columns `date` (dd/mm/yyyy), `time`, `dist_km`, `duration_hms`,

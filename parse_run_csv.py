@@ -593,18 +593,42 @@ def weather_warnings(w):
     return out
 
 
-def analyze_file(filepath, fetch=None):
-    """Analyse one CSV. Returns {session, splits, is_sprint, sprint_idx, elev, avg_hr, weather,
-    start, dur_s, total_km, pace_s, ef, drift, tss}; raises ValueError(message) if unusable."""
-    if fetch is None:
-        fetch = FETCH_WEATHER
+def file_points(filepath):
+    """Points of one CSV with cumulative distances; raises ValueError if unusable."""
     rows = load_csv(filepath)
     if not rows:
         raise ValueError("Empty file.")
     pts = extract_points(rows, filename_start(filepath))
     if len(pts) < 5:
         raise ValueError("Too few points.")
-    pts = compute_distances(pts)
+    return compute_distances(pts)
+
+
+def concat_runs(parts, gap_s=1):
+    """Join the points of one outing recorded as several files. Each later part is shifted in time to
+    follow the previous one (the pause between recordings is not moving time, and would distort the
+    pace of the km that contains it) and its distance continues from the previous total."""
+    out = list(parts[0])
+    for part in parts[1:]:
+        shift = out[-1]["ts"] - part[0]["ts"] + timedelta(seconds=gap_s)
+        d0 = out[-1]["dist_m"]
+        for p in part:
+            q = dict(p)
+            q["ts"] = p["ts"] + shift
+            q["dist_m"] = p["dist_m"] + d0
+            out.append(q)
+    return out
+
+
+def analyze_file(filepath, fetch=None):
+    """Analyse one CSV (plus the CSVs merged into it, see merged_members). Returns {session, splits, is_sprint, sprint_idx, elev, avg_hr, weather,
+    start, dur_s, total_km, pace_s, ef, drift, tss}; raises ValueError(message) if unusable."""
+    if fetch is None:
+        fetch = FETCH_WEATHER
+    pts = file_points(filepath)
+    members = merged_members(os.path.dirname(filepath) or ".").get(os.path.basename(filepath), [])
+    if members:
+        pts = concat_runs([pts] + [file_points(os.path.join(os.path.dirname(filepath), m)) for m in members])
 
     start_ts  = pts[0]["ts"]
     dur_s     = (pts[-1]["ts"] - start_ts).total_seconds()
@@ -771,6 +795,38 @@ def download_new_runs(data_dir, since=None, key=None):
         out["downloaded"].append(name)
     return out
 
+# ─── Outings recorded as several files ───────────────────────────────────────
+
+MERGE_FILE = "merged_sessions.json"
+
+
+def merged_members(data_dir):
+    """{primary CSV name: [member CSV names]} from `merged_sessions.json` in the data folder, e.g.
+    {"2026.08.18 16.45": ["2026.08.18 17.21", "2026.08.18 17.38"]}. Some outings were recorded as
+    several sessions (recording restarted after a pause); the members are analysed together with the
+    primary one, as a single session. The member CSVs stay in the folder so a download never refetches them."""
+    path = os.path.join(data_dir, MERGE_FILE)
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8-sig") as f:
+        groups = json.load(f)
+    name = lambda k: k + "-RUNNING.csv"
+    return {name(p): [name(m) for m in ms] for p, ms in groups.items()}
+
+
+def merged_member_keys(data_dir):
+    """(ISO date, time) keys of the sessions absorbed into another one."""
+    keys = set()
+    for ms in merged_members(data_dir).values():
+        keys.update(file_key(m) for m in ms)
+    return keys
+
+
+def load_folder_history(data_dir):
+    """The history of a data folder, without the rows of sessions merged into another one."""
+    drop = merged_member_keys(data_dir)
+    return [r for r in load_history(history_path(data_dir)) if session_key(r) not in drop]
+
 # ─── File discovery ───────────────────────────────────────────────────────────
 
 def find_run_files(directory="."):
@@ -789,6 +845,11 @@ def new_run_files(data_dir, history, reprocess_all=False):
     if reprocess_all:
         return files, 0
     known = {session_key(r) for r in history}
+    members = {m for ms in merged_members(data_dir).values() for m in ms}
+    for primary, ms in merged_members(data_dir).items():
+        if any(file_key(m) in known for m in ms):   # merge not applied yet: recompute the primary row
+            known.discard(file_key(primary))
+    files = [f for f in files if os.path.basename(f) not in members]
     todo = [f for f in files if file_key(f) not in known]
     return todo, len(files) - len(todo)
 
@@ -796,8 +857,9 @@ def new_run_files(data_dir, history, reprocess_all=False):
 def import_sessions(data_dir, fetch=True, reprocess_all=False):
     """Analyse the CSVs not yet in the history. Does not save anything. Returns
     {history, sessions (sorted), errors [(file, message)], skipped}."""
-    history = load_history(history_path(data_dir))
-    files, skipped = new_run_files(data_dir, history, reprocess_all)
+    raw_history = load_history(history_path(data_dir))
+    files, skipped = new_run_files(data_dir, raw_history, reprocess_all)
+    history = load_folder_history(data_dir)
     sessions, errors = [], []
     for fp in files:
         try:
@@ -854,11 +916,12 @@ def main():
             print(f"  + {n}")
         for n, m in res["errors"]:
             print(f"  ! {n}: {m}")
-    history = load_history(hist_file)
+    raw_history = load_history(hist_file)
+    history = load_folder_history(data_dir)
     if args:
         files = args
     else:
-        files, skipped = new_run_files(data_dir, history, reprocess_all)
+        files, skipped = new_run_files(data_dir, raw_history, reprocess_all)
         if skipped:
             print(f"{skipped} sessions already in the history, skipped (use --all to reprocess them).")
 
