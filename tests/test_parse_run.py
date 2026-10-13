@@ -26,11 +26,19 @@ class ParseRunTests(unittest.TestCase):
         self.assertIsNotNone(pts[-1]["alt"])
         self.assertTrue(P.detect_sprint(splits)[0])
 
-    def test_elevation_gain_counts_slow_climb_below_per_sample_threshold(self):
-        pts = [{"alt": 100 + 0.1 * i} for i in range(101)]
-        self.assertAlmostEqual(P.elevation_gain(pts), 10.0, delta=0.6)
-        flat_noise = [{"alt": 100 + (0.2 if i % 2 else 0)} for i in range(100)]
-        self.assertEqual(P.elevation_gain(flat_noise), 0.0)
+    def test_km_splits_report_altitude_as_read(self):
+        from datetime import datetime, timedelta
+        t0 = datetime(2026, 1, 1)
+        pts = [{"ts": t0 + timedelta(seconds=3 * i), "dist_m": i * 10.0, "hr": 140,
+                "alt": 58.0 - 0.006 * i * 10} for i in range(201)]            # 2 km, -6 m per km
+        sp = P.km_splits(pts)
+        self.assertEqual(len(sp), 2)
+        self.assertAlmostEqual(sp[0]["alt_start"], 58.0)
+        self.assertAlmostEqual(sp[0]["alt_delta"], -6.0)
+        self.assertAlmostEqual(sp[1]["alt_delta"], -6.0)
+        for p in pts:
+            p["alt"] = None
+        self.assertIsNone(P.km_splits(pts)[0]["alt_delta"])                    # no altitude column: nothing invented
 
     def test_distance_column_used_as_is_when_correct(self):
         pts, _ = load(km=6.0, icu_format=True, dist_factor=1)
@@ -228,6 +236,65 @@ class ParseRunTests(unittest.TestCase):
             P.save_history(P.merge_sessions(res["history"], res["sessions"]), P.history_path(d))
             again = P.import_sessions(d, fetch=False)
             self.assertEqual((len(again["sessions"]), len(again["history"])), (0, 1))   # stable on the next import
+
+    def test_merge_runs_on_request_and_unmerge(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name, km in (("2026.08.18 16.45", 3.0), ("2026.08.18 17.21", 2.0), ("2026.08.18 17.38", 1.0)):
+                write_run(os.path.join(d, f"{name}-RUNNING.csv"), km=km, icu_format=True)
+            history = P.merge_sessions([], [P.analyze_file(os.path.join(d, f), fetch=False)["session"]
+                                            for f in P.find_run_files(d)])
+            history[0]["temp_c"] = "28.1"
+            self.assertEqual(len(history), 3)
+            with self.assertRaises(ValueError):
+                P.merge_runs(d, history, history[:1])                      # one run is not a merge
+            merged = P.merge_runs(d, history, history[:2])                 # two of the three
+            self.assertEqual([r["time"] for r in merged], ["16:45", "17:38"])
+            self.assertAlmostEqual(merged[0]["dist_km"], 5.0, delta=0.05)
+            self.assertEqual(merged[0]["temp_c"], "28.1")                  # weather already recorded is kept
+            self.assertEqual(P.read_merge_groups(d), {"2026.08.18 16.45": ["2026.08.18 17.21"]})
+            # merging again a selection that includes the merged run absorbs its members too
+            again = P.merge_runs(d, merged, merged)
+            self.assertEqual([r["time"] for r in again], ["16:45"])
+            self.assertAlmostEqual(again[0]["dist_km"], 6.0, delta=0.08)
+            self.assertEqual(P.read_merge_groups(d), {"2026.08.18 16.45": ["2026.08.18 17.21", "2026.08.18 17.38"]})
+            # undo: three sessions again, the CSVs were never touched, the file is gone
+            undone = P.unmerge_run(d, again, again[0])
+            self.assertEqual([r["time"] for r in undone], ["16:45", "17:21", "17:38"])
+            self.assertEqual(sorted(P.find_run_files(d)), ["2026.08.18 16.45-RUNNING.csv", "2026.08.18 17.21-RUNNING.csv",
+                                                           "2026.08.18 17.38-RUNNING.csv"])
+            self.assertFalse(os.path.exists(os.path.join(d, P.MERGE_FILE)))
+            self.assertAlmostEqual(float(undone[0]["dist_km"]), 3.0, delta=0.05)
+            self.assertEqual(undone[1]["temp_c"], "28.1")
+            with self.assertRaises(ValueError):
+                P.unmerge_run(d, undone, undone[0])                        # no longer merged
+
+    def test_map_tile_maths_and_cached_download(self):
+        import unittest.mock as mock
+        self.assertEqual(P.world_px(0, 0, 0), (128.0, 128.0))
+        x, y = P.world_px(0, 0, 1)
+        self.assertAlmostEqual(x, 256)
+        self.assertAlmostEqual(y, 256)
+        lats, lons = [45.0, 45.0090], [9.0, 9.0001]                    # a thin 1 km road
+        z = P.fit_zoom(lats, lons, 800, 600)
+        for zz, fits in ((z, True), (z + 1, False)):
+            xa, ya = P.world_px(max(lats), min(lons), zz)
+            xb, yb = P.world_px(min(lats), max(lons), zz)
+            self.assertEqual(xb - xa <= 720 and yb - ya <= 520, fits)
+        self.assertEqual(P.fit_zoom([45.0], [9.0], 800, 600), P.MAX_ZOOM)  # a single point
+        with tempfile.TemporaryDirectory() as d:
+            class Resp:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def read(self): return b"PNGDATA"
+            with mock.patch.object(P.urllib.request, "urlopen", return_value=Resp()) as up:
+                self.assertEqual(P.fetch_tile(16, 1, 2, d), b"PNGDATA")
+                self.assertEqual(P.fetch_tile(16, 1, 2, d), b"PNGDATA")    # second time from the cache
+                self.assertEqual(up.call_count, 1)
+                req = up.call_args[0][0]
+                self.assertIn("running-coach", req.get_header("User-agent"))
+            with mock.patch.object(P.urllib.request, "urlopen", side_effect=OSError("offline")):
+                self.assertIsNone(P.fetch_tile(16, 3, 4, d))               # offline: no tile, no exception
+                self.assertFalse(os.path.exists(os.path.join(d, "16", "3", "4.png")))
 
     def test_ef_and_tss(self):
         self.assertAlmostEqual(P.compute_ef(5.0, 2250, 155), 5000 / (155 * 37.5), places=3)

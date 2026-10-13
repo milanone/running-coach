@@ -24,7 +24,6 @@ from datetime import datetime, timedelta
 # ─── Constants ────────────────────────────────────────────────────────────────
 THRESHOLD_HR    = 170    # lactate threshold HR (bpm); matches the original TSS values
 EF_BASELINE     = 0.92   # m/beat baseline (good aerobic efficiency)
-NOISE_ELEV_M    = 0.5    # ignore elevation deltas below this (GPS noise filter)
 SPRINT_PACE_S   = 15     # sec/km faster than median to flag sprint
 SPRINT_HR_BPM   = 5      # bpm above median to confirm sprint
 # Drift thresholds (%) calibrated for drift measured without warm-up
@@ -173,9 +172,11 @@ def extract_points(rows, start=None):
     ts_col   = pick_col(rows, "time", "timestamp", "datetime", "date")
     lat_col  = pick_col(rows, "lat", "latitude")
     lon_col  = pick_col(rows, "lng", "lon", "longitude")
-    alt_col  = pick_col(rows, "fixed_altitude", "altitude", "alt", "elevation")
+    alt_col  = pick_col(rows, "altitude", "alt", "elevation", "fixed_altitude")
     hr_col   = pick_col(rows, "heartrate", "heart_rate", "hr", "bpm")
     dist_col = pick_col(rows, "distance", "dist", "cum_distance", "cumulative_distance")
+    spd_col  = pick_col(rows, "velocity_smooth", "speed", "enhanced_speed")
+    raw_alt_col = pick_col(rows, "altitude", "alt", "elevation")
     base = start or datetime(2000, 1, 1)
 
     pts = []
@@ -194,6 +195,10 @@ def extract_points(rows, start=None):
             "alt":  safe_float(row.get(alt_col,  "")) if alt_col  else None,
             "hr":   safe_float(row.get(hr_col,   "")) if hr_col   else None,
             "dist_raw": safe_float(row.get(dist_col, "")) if dist_col else None,
+            "speed": safe_float(row.get(spd_col, "")) if spd_col else None,    # m/s, as saved in the CSV
+            "cadence": safe_float(row.get("cadence", "")),
+            "alt_raw": safe_float(row.get(raw_alt_col, "")) if raw_alt_col else None,
+            "alt_fixed": safe_float(row.get("fixed_altitude", "")),
         })
     return sorted(pts, key=lambda p: p["ts"])
 
@@ -276,34 +281,14 @@ def compute_distances(pts):
 
     return pts
 
-# ─── Elevation gain ───────────────────────────────────────────────────────────
-
-def climb_step(anchor, alt):
-    """Hysteresis: count a climb only once altitude moves more than NOISE_ELEV_M away from
-    the last reference point (per-sample deltas at 1 Hz are always below the threshold)."""
-    if anchor is None:
-        return 0.0, alt
-    if alt - anchor > NOISE_ELEV_M:
-        return alt - anchor, alt
-    if anchor - alt > NOISE_ELEV_M:
-        return 0.0, alt
-    return 0.0, anchor
-
-
-def elevation_gain(pts):
-    gain, anchor = 0.0, None
-    for p in pts:
-        if p["alt"] is not None:
-            g, anchor = climb_step(anchor, p["alt"])
-            gain += g
-    return gain
-
 # ─── Per-km splits ────────────────────────────────────────────────────────────
 
 def km_splits(pts):
     """
     Returns list of dicts:
-      { km, pace_s (sec/km), avg_hr, elev_gain, partial (bool), partial_dist_m }
+      { km, pace_s (sec/km), avg_hr, alt_start, alt_end, alt_delta (m, as read from the CSV, None
+        without altitude), partial (bool), partial_dist_m }
+    The altitude is not filtered or summed into an "ascent": the change over a km is end minus start.
     """
     if not pts:
         return []
@@ -312,8 +297,10 @@ def km_splits(pts):
     km_num  = 1
     t0      = pts[0]["ts"]
     hr_sum  = hr_n = 0
-    dplus   = 0.0
-    prev_alt = None
+    start_alt = last_alt = None
+
+    def delta():
+        return None if start_alt is None or last_alt is None else last_alt - start_alt
 
     for p in pts:
         d = p.get("dist_m", 0)
@@ -323,21 +310,21 @@ def km_splits(pts):
             hr_n   += 1
 
         if p["alt"] is not None:
-            g, prev_alt = climb_step(prev_alt, p["alt"])
-            dplus += g
+            last_alt = p["alt"]
+            if start_alt is None:
+                start_alt = last_alt
 
         if d >= km_num * 1000:
             dur = (p["ts"] - t0).total_seconds()
             splits.append({
                 "km": km_num, "pace_s": dur, "dur_s": dur,
                 "avg_hr": hr_sum / hr_n if hr_n else None,
-                "elev_gain": dplus, "partial": False,
+                "alt_start": start_alt, "alt_end": last_alt, "alt_delta": delta(), "partial": False,
             })
             km_num   += 1
             t0        = p["ts"]
             hr_sum    = hr_n = 0
-            dplus     = 0.0
-            prev_alt  = p["alt"] if p["alt"] is not None else None
+            start_alt = last_alt
 
     # Partial last km (> 100 m)
     last_d = pts[-1].get("dist_m", 0) - (km_num - 1) * 1000
@@ -347,7 +334,7 @@ def km_splits(pts):
         splits.append({
             "km": f"{km_num}*", "pace_s": pace, "dur_s": dur,
             "avg_hr": hr_sum / hr_n if hr_n else None,
-            "elev_gain": dplus, "partial": True, "partial_dist_m": last_d,
+            "alt_start": start_alt, "alt_end": last_alt, "alt_delta": delta(), "partial": True, "partial_dist_m": last_d,
         })
 
     return splits
@@ -621,8 +608,8 @@ def concat_runs(parts, gap_s=1):
 
 
 def analyze_file(filepath, fetch=None):
-    """Analyse one CSV (plus the CSVs merged into it, see merged_members). Returns {session, splits, is_sprint, sprint_idx, elev, avg_hr, weather,
-    start, dur_s, total_km, pace_s, ef, drift, tss}; raises ValueError(message) if unusable."""
+    """Analyse one CSV (plus the CSVs merged into it, see merged_members). Returns {session, splits, is_sprint, sprint_idx, alt_min, alt_max, avg_hr, weather,
+    start, dur_s, total_km, pace_s, ef, drift, tss, points}; raises ValueError(message) if unusable."""
     if fetch is None:
         fetch = FETCH_WEATHER
     pts = file_points(filepath)
@@ -638,7 +625,8 @@ def analyze_file(filepath, fetch=None):
 
     hr_vals  = [p["hr"] for p in pts if p["hr"] is not None]
     avg_hr   = sum(hr_vals) / len(hr_vals) if hr_vals else None
-    elev     = elevation_gain(pts)
+    alts     = [p["alt"] for p in pts if p["alt"] is not None]
+    alt_min, alt_max = (min(alts), max(alts)) if alts else (None, None)
     splits   = km_splits(pts)
 
     is_sprint, sprint_idx = detect_sprint(splits)
@@ -668,8 +656,8 @@ def analyze_file(filepath, fetch=None):
         "wind_kmh":    weather["wind_kmh"]   if weather else "",
     }
     return {"session": session, "splits": splits, "is_sprint": is_sprint, "sprint_idx": sprint_idx,
-            "elev": elev, "avg_hr": avg_hr, "weather": weather, "start": start_ts, "dur_s": dur_s,
-            "total_km": total_km, "pace_s": pace_s, "ef": ef, "drift": drift, "tss": tss}
+            "alt_min": alt_min, "alt_max": alt_max, "avg_hr": avg_hr, "weather": weather, "start": start_ts, "dur_s": dur_s,
+            "total_km": total_km, "pace_s": pace_s, "ef": ef, "drift": drift, "tss": tss, "points": pts}
 
 
 def analyze(filepath):
@@ -699,7 +687,8 @@ def analyze(filepath):
         print(f"  Drift:      {drift:.1f}% {note}{suffix}")
     if r["tss"]:
         print(f"  TSS:        {r['tss']:.0f}")
-    print(f"  Elevation:  +{r['elev']:.0f} m")
+    if r["alt_min"] is not None:
+        print(f"  Altitude:   {r['alt_min']:.1f} to {r['alt_max']:.1f} m")
 
     w = r["weather"]
     if w:
@@ -711,14 +700,58 @@ def analyze(filepath):
         sk = splits[sprint_idx]
         print(f"\n  ⚡ Final sprint detected (km {sk['km']}): {format_pace(sk['pace_s'])}/km")
 
-    print(f"\n  {'km':>4}  {'pace':>7}  {'FC':>5}  {'d+':>5}")
-    print(f"  {'─'*4}  {'─'*7}  {'─'*5}  {'─'*5}")
+    print(f"\n  {'km':>4}  {'pace':>7}  {'FC':>5}  {'alt':>6}")
+    print(f"  {'─'*4}  {'─'*7}  {'─'*5}  {'─'*6}")
     for i, sp in enumerate(splits):
         hr_str = f"{sp['avg_hr']:.0f}" if sp.get("avg_hr") else "  —"
-        el_str = f"+{sp['elev_gain']:.0f}m" if sp["elev_gain"] > 0.5 else "   —"
+        el_str = f"{sp['alt_delta']:+.1f}m" if sp["alt_delta"] is not None else "—"
         flag   = " ⚡" if is_sprint and i == sprint_idx else ""
-        print(f"  {str(sp['km']):>4}  {format_pace(sp['pace_s']):>7}  {hr_str:>5}  {el_str:>5}{flag}")
+        print(f"  {str(sp['km']):>4}  {format_pace(sp['pace_s']):>7}  {hr_str:>5}  {el_str:>6}{flag}")
     return r["session"]
+
+# ─── Map tiles (OpenStreetMap) ────────────────────────────────────────────────
+
+TILE_URL   = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+TILE_CACHE = os.path.join(os.path.expanduser("~"), ".running_coach_tiles")    # outside the repos and the data folder
+MAX_ZOOM   = 18
+
+
+def world_px(lat, lon, z):
+    """Web-Mercator pixel (x, y) of a coordinate on the whole-world map at zoom z (256 px tiles)."""
+    n = 256 * 2 ** z
+    s = math.sin(math.radians(max(-85.0511, min(85.0511, lat))))
+    return (lon + 180) / 360 * n, (0.5 - math.log((1 + s) / (1 - s)) / (4 * math.pi)) * n
+
+
+def fit_zoom(lats, lons, w, h, margin=40):
+    """Highest zoom at which the bounding box of the track fits a w x h view with a margin."""
+    for z in range(MAX_ZOOM, 0, -1):
+        x0, y0 = world_px(max(lats), min(lons), z)
+        x1, y1 = world_px(min(lats), max(lons), z)
+        if x1 - x0 <= w - 2 * margin and y1 - y0 <= h - 2 * margin:
+            return z
+    return 1
+
+
+def fetch_tile(z, x, y, cache_dir=None):
+    """PNG bytes of one OpenStreetMap tile: from the local cache, else downloaded and cached. None on failure.
+    Tile policy: an identifying User-Agent, a local cache, no bulk download (a run needs a handful of tiles)."""
+    path = os.path.join(cache_dir or TILE_CACHE, str(z), str(x), f"{y}.png")
+    if os.path.isfile(path):
+        with open(path, "rb") as f:
+            return f.read()
+    try:
+        req = urllib.request.Request(TILE_URL.format(z=z, x=x, y=y),
+                                     headers={"User-Agent": "running-coach/1.0 (personal analyzer, github.com/milanone/running-coach)"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = r.read()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+        return data
+    except Exception:
+        return None
+
 
 # ─── intervals.icu download ───────────────────────────────────────────────────
 
@@ -805,13 +838,32 @@ def merged_members(data_dir):
     {"2026.08.18 16.45": ["2026.08.18 17.21", "2026.08.18 17.38"]}. Some outings were recorded as
     several sessions (recording restarted after a pause); the members are analysed together with the
     primary one, as a single session. The member CSVs stay in the folder so a download never refetches them."""
+    name = lambda k: k + "-RUNNING.csv"
+    return {name(p): [name(m) for m in ms] for p, ms in read_merge_groups(data_dir).items()}
+
+
+def read_merge_groups(data_dir):
+    """The raw content of `merged_sessions.json`: {"YYYY.MM.DD HH.MM": ["YYYY.MM.DD HH.MM", ...]}."""
     path = os.path.join(data_dir, MERGE_FILE)
     if not os.path.exists(path):
         return {}
     with open(path, encoding="utf-8-sig") as f:
-        groups = json.load(f)
-    name = lambda k: k + "-RUNNING.csv"
-    return {name(p): [name(m) for m in ms] for p, ms in groups.items()}
+        return json.load(f)
+
+
+def write_merge_groups(data_dir, groups):
+    path = os.path.join(data_dir, MERGE_FILE)
+    if not groups:
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(groups, f, indent=1, ensure_ascii=False)
+
+
+def run_key(path):
+    """'.../2026.08.18 16.45-RUNNING.csv' -> '2026.08.18 16.45' (the key used in merged_sessions.json)."""
+    return os.path.basename(path)[:-len("-RUNNING.csv")]
 
 
 def merged_member_keys(data_dir):
@@ -820,6 +872,56 @@ def merged_member_keys(data_dir):
     for ms in merged_members(data_dir).values():
         keys.update(file_key(m) for m in ms)
     return keys
+
+
+def merge_runs(data_dir, history, rows):
+    """Merge the given history rows (two or more) into one outing starting at the earliest, as if it
+    had been listed in merged_sessions.json. Returns the new history (not saved). Reversible: the CSVs
+    stay in the folder and unmerge_run() undoes it. Raises ValueError (nothing is changed)."""
+    rows = sorted(rows, key=session_key)
+    if len(rows) < 2:
+        raise ValueError("Select at least two runs to merge.")
+    keys = []
+    for r in rows:
+        path = session_file(data_dir, r)
+        if not path:
+            raise ValueError(f"CSV of {r['date']} {r['time']} not found in the folder.")
+        keys.append(run_key(path))
+    old = read_merge_groups(data_dir)
+    groups = {k: list(v) for k, v in old.items()}
+    primary = keys[0]
+    members = set(groups.get(primary, []))
+    for k in keys[1:]:
+        members.add(k)
+        members.update(groups.pop(k, []))          # a selected run that already absorbed others
+    groups[primary] = sorted(members)
+    write_merge_groups(data_dir, groups)
+    try:
+        session = analyze_file(os.path.join(data_dir, primary + "-RUNNING.csv"), fetch=False)["session"]
+    except ValueError:
+        write_merge_groups(data_dir, old)
+        raise
+    drop = {file_key(m + "-RUNNING.csv") for m in members}
+    return merge_sessions([r for r in history if session_key(r) not in drop], [session])
+
+
+def unmerge_run(data_dir, history, row):
+    """Undo a merge: the primary and its members become separate sessions again (the members get the
+    weather recorded for the outing). Returns the new history (not saved)."""
+    path = session_file(data_dir, row)
+    groups = read_merge_groups(data_dir)
+    members = groups.pop(run_key(path), None) if path else None
+    if not members:
+        raise ValueError("This run is not a merged session.")
+    write_merge_groups(data_dir, groups)
+    sessions = []
+    for k in [run_key(path)] + members:
+        s = analyze_file(os.path.join(data_dir, k + "-RUNNING.csv"), fetch=False)["session"]
+        for field in ("temp_c", "humidity_pct", "wind_kmh"):
+            if s.get(field) in ("", None):
+                s[field] = row.get(field, "")
+        sessions.append(s)
+    return merge_sessions(history, sessions)
 
 
 def load_folder_history(data_dir):
