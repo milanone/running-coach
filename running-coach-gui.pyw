@@ -17,6 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import parse_run_csv as core  # noqa: E402
+import run_metrics as rm  # noqa: E402
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".running_coach_gui.json")
 
@@ -29,6 +30,37 @@ METRICS = [
     ("EF (m/beat/min)", "ef_m_beat", core.safe_float, lambda v: f"{v:.3f}", False),
     ("Drift (%)", "drift_pct", core.safe_float, lambda v: f"{v:.1f}", False),
     ("TSS", "tss", core.safe_float, lambda v: f"{v:.0f}", False),
+    ("VO2max estimate (ml/kg/min)", "adv.vo2max", lambda v: v, lambda v: f"{v:.1f}", False),
+    ("Pace at a fixed HR (min/km)", "adv.pace_at_hr", lambda v: v and v / 60, lambda v: core.pace_csv(v * 60), True),
+    ("HR at the usual speed (bpm)", "adv.hr_at_speed", lambda v: v, lambda v: f"{v:.0f}", False),
+    ("Fitness, CTL", "adv.ctl", lambda v: v, lambda v: f"{v:.1f}", False),
+    ("Fatigue, ATL", "adv.atl", lambda v: v, lambda v: f"{v:.1f}", False),
+    ("Form, TSB", "adv.tsb", lambda v: v, lambda v: f"{v:+.1f}", False),
+    ("TRIMP (Edwards)", "adv.trimp", lambda v: v, lambda v: f"{v:.0f}", False),
+    ("Training effect (indicative)", "adv.te", lambda v: v, lambda v: f"{v:.1f}", False),
+    ("Performance condition (%)", "adv.perf_pct", lambda v: v, lambda v: f"{v:+.1f}", False),
+    ("Cadence (steps/min)", "adv.spm", lambda v: v, lambda v: f"{v:.0f}", False),
+    ("Step length (m)", "adv.step_m", lambda v: v, lambda v: f"{v:.2f}", False),
+    ("Power, rough model (W)", "adv.power_w", lambda v: v, lambda v: f"{v:.0f}", False),
+    ("Second half vs first (%)", "adv.split_balance_pct", lambda v: v, lambda v: f"{v:+.1f}", False),
+    ("HR rise time (s)", "adv.hr_rise_s", lambda v: v, lambda v: f"{v:.0f}", False),
+    ("HR recovery in 60 s (bpm)", "adv.hrr60", lambda v: v, lambda v: f"{v:.0f}", False),
+]
+# column of the Fitness table: key, title, width, formatter of the per-run metrics
+FITNESS_COLUMNS = [
+    ("date", "Date", 78, lambda m: f"{m['date'][8:]}/{m['date'][5:7]}/{m['date'][:4]}"),
+    ("time", "Time", 50, lambda m: m["time"]),
+    ("moving", "Moving", 58, lambda m: rm.fmt_time(m["moving_s"])),
+    ("trimp", "TRIMP", 50, lambda m: f"{m['trimp']:.0f}"),
+    ("te", "TE*", 40, lambda m: f"{m['te']:.1f}"),
+    ("vo2", "VO2max", 56, lambda m: "" if m["vo2max"] is None else f"{m['vo2max']:.1f}"),
+    ("pacehr", "Pace@HR", 60, lambda m: "" if m["pace_at_hr"] is None else core.format_pace(m["pace_at_hr"])),
+    ("hrspeed", "HR@speed", 72, lambda m: "" if m["hr_at_speed"] is None else f"{m['hr_at_speed']:.0f}"),
+    ("spm", "Steps/min", 62, lambda m: "" if m["spm"] is None else f"{m['spm']:.0f}"),
+    ("step", "Step m", 50, lambda m: "" if m["step_m"] is None else f"{m['step_m']:.2f}"),
+    ("power", "W*", 40, lambda m: "" if m["power_w"] is None else f"{m['power_w']:.0f}"),
+    ("perf", "Perf %", 50, lambda m: "" if m["perf_pct"] is None else f"{m['perf_pct']:+.1f}"),
+    ("tsb", "Form", 46, lambda m: "" if m["tsb"] is None else f"{m['tsb']:+.0f}"),
 ]
 RUN_PANELS = [  # title, [(key in the series, colour, label)]: every value column of the CSV
     ("Speed (km/h)", [("spd", "#2f6fdb", "velocity_smooth")]),
@@ -124,9 +156,9 @@ class App(tk.Tk):
         self.tabs.pack(fill="both", expand=True, padx=8, pady=(0, 6))
         self._build_history_tab()
         self._build_chart_tab()
-        self._build_reco_tab()
         self._build_run_tab()
         self._build_map_tab()
+        self._build_fitness_tab()
 
     def _build_history_tab(self):
         tab = ttk.Frame(self.tabs)
@@ -180,26 +212,10 @@ class App(tk.Tk):
         box = ttk.Combobox(row, textvariable=self.metric, values=[m[0] for m in METRICS],
                            state="readonly", width=24)
         box.pack(side="left", padx=6)
-        box.bind("<<ComboboxSelected>>", lambda e: self.draw_chart())
+        box.bind("<<ComboboxSelected>>", lambda e: (self.draw_chart(), self.ensure_fitness()))
         self.canvas = tk.Canvas(tab, background="white", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.canvas.bind("<Configure>", lambda e: self.draw_chart())
-
-    def _build_reco_tab(self):
-        tab = ttk.Frame(self.tabs, padding=24)
-        self.tabs.add(tab, text="Next session")
-        self.reco_head = ttk.Label(tab, text="", font=("TkDefaultFont", 11))
-        self.reco_head.pack(anchor="w")
-        self.reco_vars = {k: tk.StringVar(value="—") for k in ("rest", "dist", "pace", "ef")}
-        grid = ttk.Frame(tab)
-        grid.pack(anchor="w", pady=16)
-        for i, (key, label) in enumerate((("rest", "Rest"), ("dist", "Distance"),
-                                          ("pace", "Pace"), ("ef", "EF trend"))):
-            ttk.Label(grid, text=label, width=12).grid(row=i, column=0, sticky="w", pady=4)
-            ttk.Label(grid, textvariable=self.reco_vars[key], font=("TkDefaultFont", 16, "bold")).grid(
-                row=i, column=1, sticky="w")
-        self.reco_notes = ttk.Label(tab, text="", justify="left", wraplength=700)
-        self.reco_notes.pack(anchor="w")
 
     # ── data ─────────────────────────────────────────────────────────────
     def _dir(self):
@@ -221,7 +237,7 @@ class App(tk.Tk):
             b.state(["!disabled"] if d else ["disabled"])
         self.refresh_table()
         self.draw_chart()
-        self.refresh_reco()
+        self.start_fitness()
         self.status.set(f"{len(self.history)} sessions in the history." if d else
                         "Choose the folder that holds the run CSVs and running_history.csv.")
 
@@ -327,7 +343,7 @@ class App(tk.Tk):
         self.save_history()
         self.refresh_table(select="|".join(core.session_key(first)))
         self.draw_chart()
-        self.refresh_reco()
+        self.start_fitness()
         self.status.set(f"{len(rows)} runs merged into {first['date']} {first['time']}.")
 
     def unmerge_selected(self):
@@ -342,7 +358,7 @@ class App(tk.Tk):
         self.save_history()
         self.refresh_table(select="|".join(core.session_key(rows[0])))
         self.draw_chart()
-        self.refresh_reco()
+        self.start_fitness()
         self.status.set(f"{rows[0]['date']} {rows[0]['time']} split into its original runs.")
 
     # ── run detail (per-second values as saved in the CSV) ───────────────
@@ -492,7 +508,7 @@ class App(tk.Tk):
         c.bind("<Button-5>", lambda e: self.map_zoom(e.x, e.y, -1))
         c.bind("<Motion>", self.map_hover)
         c.bind("<Leave>", lambda e: c.delete("hover"))
-        self.tabs.bind("<<NotebookTabChanged>>", lambda e: self.draw_map())
+        self.tabs.bind("<<NotebookTabChanged>>", lambda e: self._tab_changed())
         self.map_tiles = {}        # (z, x, y) -> PhotoImage, or None when the download failed
         self.map_pending = set()   # tiles asked of the worker thread and not yet back
         self.map_wanted = set()    # tiles of the current view: the worker skips the others (the view moved on)
@@ -691,6 +707,147 @@ class App(tk.Tk):
         if self.map_pending:
             self._tile_job = self.after(100, self._tile_poll)
 
+    # ── fitness: advanced metrics (estimates) ────────────────────────────
+    def _build_fitness_tab(self):
+        tab = ttk.Frame(self.tabs)
+        self.fit_tab = tab
+        self.tabs.add(tab, text="Fitness")
+        self.fit_summary = tk.Text(tab, height=13, wrap="word", relief="flat", state="disabled", background=self.cget("background"),
+                                   font=("TkDefaultFont", 10))
+        self.fit_summary.pack(fill="x", padx=10, pady=(8, 4))
+        body = ttk.Frame(tab)
+        body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        cols = [c[0] for c in FITNESS_COLUMNS]
+        self.fit_tree = ttk.Treeview(body, columns=cols, show="headings", selectmode="browse")
+        for key, title, width, _ in FITNESS_COLUMNS:
+            self.fit_tree.heading(key, text=title)
+            self.fit_tree.column(key, width=width, anchor="center", stretch=False)
+        self.fit_tree.pack(side="left", fill="both", expand=True)
+        self.fit_tree.bind("<<TreeviewSelect>>", lambda e: self.fit_show())
+        self.fit_detail = tk.Text(body, width=58, wrap="word", relief="flat", state="disabled", background=self.cget("background"),
+                                  font=("TkDefaultFont", 10))
+        self.fit_detail.pack(side="left", fill="y", padx=(10, 0))
+        self.fit_rows, self.adv = [], {}
+        self.fit_queue = queue.Queue()
+        self.fit_job, self.fit_thread, self.fit_id, self.fit_cancel, self.fit_stale = None, None, 0, None, True
+        self.athlete = dict(rm.DEFAULT_ATHLETE)
+
+    def _write(self, widget, text):
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", text)
+        widget.configure(state="disabled")
+
+    def start_fitness(self):
+        """The history changed, so the metrics are stale. They are computed when a tab that shows them is the selected one."""
+        self.fit_id += 1                                   # a result still on its way belongs to the old history
+        if not self._dir() or not self.history:
+            self.fit_stale = False
+            self.apply_fitness(self.fit_id, [], None)
+            return
+        self.fit_stale = True
+        self.ensure_fitness()
+
+    def ensure_fitness(self):
+        """Start the computation if the metrics are stale and the Fitness tab, or Charts on an advanced metric, is showing."""
+        if not self.fit_stale:
+            return
+        sel = self.tabs.select()
+        charts = sel == str(self.tabs.tabs()[1]) and next(m for m in METRICS if m[0] == self.metric.get())[1].startswith("adv.")
+        if sel == str(self.fit_tab) or charts:
+            self._run_fitness()
+
+    def _tab_changed(self):
+        self.draw_map()
+        self.ensure_fitness()
+
+    def _run_fitness(self):
+        """Compute the advanced metrics in a thread (a few seconds the first time, then the cache); the result comes back through
+        fit_queue. The thread must not touch the window (Tk objects dying in another thread crash), so it gets plain values."""
+        d = self._dir()
+        self.fit_stale = False
+        self.fit_id += 1
+        self.athlete = rm.read_athlete(d)
+        if self.fit_cancel:
+            self.fit_cancel.set()
+        cancel = self.fit_cancel = threading.Event()
+        job, history, athlete, out = self.fit_id, list(self.history), dict(self.athlete), self.fit_queue
+        self._write(self.fit_summary, "Computing the advanced metrics...")
+
+        def abort(n, total):
+            if cancel.is_set():
+                raise InterruptedError
+
+        def work():
+            try:
+                rows = rm.compute_all(d, history, athlete, progress=abort)
+                out.put((job, rows, rm.summary(rows, history, athlete)))
+            except InterruptedError:
+                pass
+            except Exception as e:                       # a failure here must not stop the program: say it in the tab
+                out.put((job, None, f"Could not compute the advanced metrics: {e}"))
+
+        self.fit_thread = threading.Thread(target=work, daemon=True)
+        self.fit_thread.start()
+        if self.fit_job is None:
+            self.fit_job = self.after(150, self._fit_poll)
+
+    def _fit_poll(self):
+        self.fit_job = None
+        try:
+            while True:
+                job, rows, summ = self.fit_queue.get_nowait()
+                if job == self.fit_id:
+                    self.apply_fitness(job, rows, summ)
+        except queue.Empty:
+            pass
+        if self.fit_thread is not None and self.fit_thread.is_alive():
+            self.fit_job = self.after(150, self._fit_poll)
+
+    def fitness_now(self):
+        """Synchronous version (used by the tests)."""
+        d = self._dir()
+        self.fit_id += 1
+        self.fit_stale = False
+        self.athlete = rm.read_athlete(d) if d else dict(rm.DEFAULT_ATHLETE)
+        rows = rm.compute_all(d, self.history, self.athlete) if d else []
+        self.apply_fitness(self.fit_id, rows, rm.summary(rows, self.history, self.athlete) if rows else None)
+
+    def apply_fitness(self, job, rows, summ):
+        self.fit_tree.delete(*self.fit_tree.get_children())
+        self._write(self.fit_detail, "")
+        if rows is None:
+            self.fit_rows, self.adv = [], {}
+            self._write(self.fit_summary, summ)
+            return
+        self.fit_rows = rows
+        self.adv = {(m["date"], m["time"]): m for m in rows}
+        for i in range(len(rows) - 1, -1, -1):           # newest first
+            self.fit_tree.insert("", "end", iid=str(i), values=[c[3](rows[i]) for c in FITNESS_COLUMNS])
+        if summ:
+            text = "\n".join(rm.next_session_lines(rm.next_session(self.history, rows, summ)) + [""] + rm.summary_lines(summ))
+            d = self._dir()
+            if d and not os.path.exists(os.path.join(d, rm.ATHLETE_FILE)):
+                text += f"\nNo {rm.ATHLETE_FILE} in the data folder: default parameters. Put your own in it, e.g. {{\"hr_max\": 185, \"hr_rest\": 55, \"mass_kg\": 70}}."
+            self._write(self.fit_summary, text)
+        else:
+            self._write(self.fit_summary, "Import some runs to see the advanced metrics.")
+        self.draw_chart()
+
+    def fit_show(self):
+        sel = self.fit_tree.selection()
+        if not sel:
+            self._write(self.fit_detail, "")
+            return
+        m = self.fit_rows[int(sel[0])]
+        self._write(self.fit_detail, f"{m['date']} {m['time']}   {m['dist_km'] or 0:.2f} km\n\n" + "\n".join(rm.run_lines(m)) +
+                    "\n\n* indicative: the scale is not calibrated against a Garmin.")
+
+    def _metric_value(self, row, key):
+        if key.startswith("adv."):
+            return self.adv.get(core.session_key(row), {}).get(key[4:])
+        return row.get(key, "")
+
     def selected_row(self):
         sel = self.tree.selection()
         if not sel:
@@ -765,7 +922,7 @@ class App(tk.Tk):
         label, key, parse, fmt, invert = next(m for m in METRICS if m[0] == self.metric.get())
         data = []
         for r in sorted(self.history, key=core.session_key):
-            v = parse(r.get(key, ""))
+            v = parse(self._metric_value(r, key))
             if v is not None:
                 try:
                     day = datetime.strptime(core.session_key(r)[0], "%Y-%m-%d")
@@ -817,25 +974,6 @@ class App(tk.Tk):
             if len(data) <= 24:
                 c.create_text(x, y - 12, text=fmt(v), fill="#333", font=("TkDefaultFont", 8))
         c.create_text(w - right, h - 8, anchor="e", fill="#e08a1e", text="- - moving average (3 sessions)")
-
-    # ── recommendation ───────────────────────────────────────────────────
-    def refresh_reco(self):
-        for v in self.reco_vars.values():
-            v.set("—")
-        self.reco_notes.configure(text="")
-        if not self.history:
-            self.reco_head.configure(text="No session in the history.")
-            return
-        last = sorted(self.history, key=core.session_key)[-1]
-        rec = core.compute_recommendations(self.history, last)
-        self.reco_head.configure(text=f"After the run of {last['date']} {last['time']} "
-                                      f"({last['dist_km']} km):")
-        n = rec["rest"]
-        self.reco_vars["rest"].set(f"{n} {'day' if n == 1 else 'days'}")
-        self.reco_vars["dist"].set(f"{rec['dist_km']:.1f} km")
-        self.reco_vars["pace"].set(f"{core.format_pace(rec['pace_s'])} /km")
-        self.reco_vars["ef"].set({"improving": "↑ improving", "declining": "↓ declining"}.get(rec["ef_trend"], "—"))
-        self.reco_notes.configure(text="\n".join(f"{i}  {t}" for i, t in rec["notes"]))
 
     # ── import ───────────────────────────────────────────────────────────
     def set_busy(self, busy, msg=""):
@@ -894,7 +1032,7 @@ class App(tk.Tk):
         self.save_history()
         self.refresh_table()
         self.draw_chart()
-        self.refresh_reco()
+        self.start_fitness()
         got = result.get("download")
         msg = f"{len(sessions)} sessions imported, {result['skipped']} already present"
         if got:
@@ -907,7 +1045,7 @@ class App(tk.Tk):
         if errors:
             messagebox.showwarning("Files not imported", "\n".join(f"{f}: {m}" for f, m in errors))
         if sessions:
-            self.tabs.select(2)
+            self.tabs.select(self.fit_tab)
 
     # ── misc ─────────────────────────────────────────────────────────────
     def _on_error(self, exc, val, tb):
@@ -919,6 +1057,12 @@ class App(tk.Tk):
     def _close(self):
         self._save_config()
         self.after_cancel(self._poll_job)   # a pending timer would fire on a destroyed window
+        if self.fit_cancel:
+            self.fit_cancel.set()           # the metrics thread stops at its next file; wait for it (it holds the CSVs open)
+        if self.fit_job is not None:
+            self.after_cancel(self.fit_job)
+        if self.fit_thread is not None:
+            self.fit_thread.join(timeout=30)
         if self._tile_job is not None:
             self.after_cancel(self._tile_job)
         self.tile_req.put(None)                       # stops the tile worker

@@ -13,3 +13,5 @@ howto.txt
 example data/
 *.lnk
 intervals_api_key.txt
+athlete.json
+run_metrics_cache.json

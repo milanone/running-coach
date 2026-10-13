@@ -8,13 +8,13 @@ Drive mirror, how he works) are in `..\CLAUDE.md`; this file has the project-spe
 
 Analyzer for running sessions exported from intervals.icu (activities recorded with Samsung Health): per-km splits,
 efficiency factor, cardiac drift, TSS, altitude, sprint detection, Open-Meteo weather, a local history file and advice
-for the next session. A command-line tool (`parse_run_csv.py`) and a Tkinter GUI (`running-coach-gui.pyw`) share the same
-logic.
+for the next session. A Tkinter GUI (`running-coach-gui.pyw`) on top of a logic module (`parse_run_csv.py`) and the advanced
+metrics (`run_metrics.py`). The command-line tool was removed on Francesco's request (2026-10-13): `main()`, `analyze()`, the printing
+`recommendations()`, `is_latest` and `format_hms` went with it.
 
 ## Running / tests
 
 ```bash
-py parse_run_csv.py [--data FOLDER] [--no-weather] [--all] [file.csv ...]
 pythonw running-coach-gui.pyw
 py -m unittest discover -s tests -v
 ```
@@ -28,7 +28,7 @@ folder shown in the first one is a placeholder typed into the entry after loadin
 
 ## Architecture
 
-- `parse_run_csv.py`: the logic (and the CLI in `main()`): `load_csv` / `extract_points` (the `time` column may be an ISO
+- `parse_run_csv.py`: the logic (no command line): `load_csv` / `extract_points` (the `time` column may be an ISO
   timestamp or elapsed seconds, with the start taken from the file name), `compute_distances` (the file's `distance` column, else
   haversine GPS with an estimate for the pre-GPS lock-up), `km_splits` (altitude at the start and end of each km, read as saved: no filtering and no ascent total, removed on purpose, see the note under *Run detail tab*),
   `detect_sprint` (last full km faster by `SPRINT_PACE_S` and `SPRINT_HR_BPM` higher than the median), `cardiac_drift`
@@ -36,10 +36,34 @@ folder shown in the first one is a placeholder typed into the entry after loadin
   `compute_recommendations`, the history I/O (`load_history`, `save_history`, `upsert`, `merge_sessions`) and
   `analyze_file` / `import_sessions` used by the GUI. Personal parameters are constants at the top (`THRESHOLD_HR`,
   `EF_BASELINE`, the `DRIFT_*` thresholds...).
+- `run_metrics.py`: the advanced metrics, see the section below.
 - `running-coach-gui.pyw`: class `App` (Tkinter): History tab (sortable table, per-km detail), Charts tab
-  (hand-drawn on a `tk.Canvas`, with a 3-session moving average), Next session tab. The import runs in a thread and
+  (hand-drawn on a `tk.Canvas`, with a 3-session moving average), no Next session tab (the advice for the next run is the top block of the Fitness tab: `run_metrics.next_session`, the core's `compute_recommendations` refined with the load ratio and the pace at a fixed heart rate). The import runs in a thread and
   reports through a queue polled by `_poll`; `import_now()` is the synchronous version used by the tests.
   The data folder is remembered in `~/.running_coach_gui.json`.
+
+## Advanced metrics (`run_metrics.py`)
+
+Pure functions (no Tk), imported by the GUI as `rm`; `run_metrics(pts, athlete, speed_ref)` returns the per-run dict, `compute_all(data_dir,
+history, athlete)` the table over the history (per-file cache `run_metrics_cache.json` keyed by file mtime, merge file mtime, athlete values,
+reference speed and `CACHE_VERSION`: bump it when a formula changes), `summary()` / `summary_lines()` the Fitness tab text, `run_lines()` the
+per-run text. The athlete's parameters (`athlete.json`: `hr_max`, `hr_rest`, `mass_kg`, `cadence_factor`, `hr_ref`) live in the private data folder
+and are Francesco's own; the defaults in the code are generic on purpose (this repo is public: never write his body values here).
+The GUI computes them lazily in a thread (`ensure_fitness`, only when the Fitness tab or Charts on an `adv.` metric is selected): the thread gets
+plain values and a `threading.Event` to cancel, never `self` (a Tk object released in another thread crashes with "Tcl interpreter is leaked").
+
+What each estimate rests on, and how far it is checked (nothing here is validated against a Garmin or a lab):
+- **Checked against published numbers I remember, not against the papers**: the VDOT equations (Daniels-Gilbert) reproduce the VDOT 50 row of Daniels'
+  table to within seconds (5 km 19:56 vs 19:57, 10 km 41:20 vs 41:21, marathon 3:10:40 vs 3:10:49).
+- **Formulas written from memory, to confirm against the source when it is available**: ACSM running equation (`0.2 * v + 3.5`, m/min; meant for
+  speeds above ~8 km/h, Francesco jogs at ~7.7 km/h); the equivalence of %HRR and %VO2R (Swain and Leutholtz 1997); Riegel's exponent 1.06
+  (1981); Edwards' zone weights 1-5; the Garmin-style acute/chronic ratio and the 0.8-1.3 band.
+- **Mine, not from a source**: the training effect (`5 * (1 - exp(-TRIMP / 110))`) and the recovery time (`4 * TE^2` hours), the power coefficient
+  1.04 W per kg per m/s, the training-status thresholds (including `LOW_WEEKLY_TSS` = 100, below which a high ratio is "Ramping up"),
+  and the performance-condition window (minutes 6-20, median of the previous ten runs).
+- On Francesco's 35 runs the per-run VO2max estimate scatters between about 40 and 49 (+-10%), the median of five gives ~45; use the trend.
+  The acute/chronic ratio with exponential averages (CTL/ATL) swung between 0.4 and 1.5 for a once-a-week runner, so the ratio uses the 7-day
+  and 28-day sums instead.
 
 ## Run detail tab
 
@@ -112,7 +136,7 @@ with the English names on the next save; `test_legacy_italian_history_is_read_an
 - The logic is tested on synthetic runs only; the formulas (EF, drift, TSS with `THRESHOLD_HR` 170) come from the
   original script and were not re-derived. The real history (16 sessions) was read and re-saved in a temporary copy.
 - The sprint rule, the advice thresholds and the pace/rest arithmetic are heuristics, not validated training science.
-- Weather sends the start coordinates to Open-Meteo unless `--no-weather` or the GUI box is off.
+- Weather sends the start coordinates to Open-Meteo unless the GUI box is off (or `FETCH_WEATHER` is False).
 
 ## PlotStyleKit
 

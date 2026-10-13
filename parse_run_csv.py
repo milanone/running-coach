@@ -1,23 +1,10 @@
-#!/usr/bin/env python3
 """
-parse_run_csv.py – Running activity analyzer for intervals.icu CSV exports
-(activities recorded with Samsung Health, exported from intervals.icu)
-
-Usage:
-    python parse_run_csv.py             # process all YYYY.MM.DD HH.MM-RUNNING.csv
-    python parse_run_csv.py file.csv    # single file
-    python parse_run_csv.py --download  # first fetch the new runs from intervals.icu (API key needed)
-
-Output:
-    - Per-km breakdown table
-    - Session metrics (EF, cardiac drift, TSS)
-    - Weather data (Open-Meteo, silent if unavailable)
-    - Sprint detection (final km auto-detected)
-    - Next-session recommendations
-    - Appends/updates running_history.csv
+parse_run_csv.py - the logic behind the running-coach GUI (running-coach-gui.pyw): reading the intervals.icu CSV exports of runs
+recorded with Samsung Health, per-km splits, session metrics (EF, cardiac drift, TSS), sprint detection, Open-Meteo weather, the
+history file, merged outings, the intervals.icu download and the next-session rules. There is no command line any more.
 """
 
-import sys, csv, os, math, re, json, base64
+import csv, os, math, re, json, base64
 import urllib.request
 from datetime import datetime, timedelta
 
@@ -33,7 +20,7 @@ DRIFT_VERY_HIGH = 8      # above: recovery-length next run
 DRIFT_PROGRESS  = 4      # below (with improving EF): distance can progress
 DRIFT_INTENSIFY = 3      # below (with improving EF): pace can drop slightly
 WARMUP_S        = 600    # warm-up excluded from cardiac drift (capped at 25% of the run)
-FETCH_WEATHER   = True   # False or --no-weather: no coordinates sent to Open-Meteo
+FETCH_WEATHER   = True   # False: no coordinates sent to Open-Meteo (the GUI box overrides it)
 HISTORY_FILE    = "running_history.csv"
 # Column names written by earlier (Italian) versions of the history file
 LEGACY_FIELDS   = {
@@ -63,13 +50,6 @@ def format_pace(sec_per_km):
         return "--:--"
     m, s = divmod(int(round(sec_per_km)), 60)
     return f"{m}:{s:02d}"
-
-
-def format_hms(seconds):
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 def hms_csv(seconds):
@@ -503,9 +483,6 @@ def save_history(records, path=None):
         w.writerows(records)
 
 
-def is_latest(history, rec):
-    return bool(history) and session_key(rec) == max(session_key(r) for r in history)
-
 def merge_sessions(history, sessions):
     """Merge new session dicts into the history (new rows win) and return it sorted."""
     for sess in sorted(sessions, key=session_key):
@@ -552,22 +529,6 @@ def compute_recommendations(history, session):
         notes.append(("✓", f"Low drift ({drift:.1f}%) → excellent aerobic form"))
     return {"rest": rest, "dist_km": dist_rec, "pace_s": pace_rec, "ef_trend": ef_trend, "notes": notes}
 
-
-def recommendations(history, session):
-    rec = compute_recommendations(history, session)
-    rest = rec["rest"]
-    print("\n" + "═" * 52)
-    print("  RECOMMENDED NEXT SESSION")
-    print("═" * 52)
-    print(f"  Rest:     {rest} {'day' if rest == 1 else 'days'}")
-    print(f"  Distance: {rec['dist_km']:.1f} km")
-    print(f"  Pace:     {format_pace(rec['pace_s'])}/km")
-    if rec["ef_trend"]:
-        arrow = "↑" if rec["ef_trend"] == "improving" else "↓"
-        print(f"  EF trend: {arrow} {rec['ef_trend']}")
-    for icon, text in rec["notes"]:
-        print(f"  {icon}  {text}")
-    print("═" * 52)
 
 # ─── Single-file analysis ─────────────────────────────────────────────────────
 
@@ -659,55 +620,6 @@ def analyze_file(filepath, fetch=None):
             "alt_min": alt_min, "alt_max": alt_max, "avg_hr": avg_hr, "weather": weather, "start": start_ts, "dur_s": dur_s,
             "total_km": total_km, "pace_s": pace_s, "ef": ef, "drift": drift, "tss": tss, "points": pts}
 
-
-def analyze(filepath):
-    """CLI wrapper: print the analysis, return the session dict (or None)."""
-    print(f"\n{'═'*60}")
-    print(f"  {os.path.basename(filepath)}")
-    print(f"{'═'*60}")
-    try:
-        r = analyze_file(filepath)
-    except ValueError as e:
-        print(f"  {e}")
-        return None
-
-    drift, is_sprint, sprint_idx, splits = r["drift"], r["is_sprint"], r["sprint_idx"], r["splits"]
-    print(f"\n  Date:       {r['start'].strftime('%d/%m/%Y %H:%M')}")
-    print(f"  Distance:   {r['total_km']:.2f} km")
-    print(f"  Duration:   {format_hms(r['dur_s'])}")
-    print(f"  Pace:       {format_pace(r['pace_s'])}/km")
-    if r["avg_hr"]:
-        print(f"  Avg HR:     {r['avg_hr']:.0f} bpm")
-    if r["ef"]:
-        status = "✓" if r["ef"] >= EF_BASELINE else "○"
-        print(f"  EF:         {r['ef']:.3f} m/beat {status}")
-    if drift is not None:
-        note = "↑ high" if drift > DRIFT_HIGH else ("↓ low" if drift < DRIFT_LOW else "~")
-        suffix = " (sprint excluded)" if is_sprint else ""
-        print(f"  Drift:      {drift:.1f}% {note}{suffix}")
-    if r["tss"]:
-        print(f"  TSS:        {r['tss']:.0f}")
-    if r["alt_min"] is not None:
-        print(f"  Altitude:   {r['alt_min']:.1f} to {r['alt_max']:.1f} m")
-
-    w = r["weather"]
-    if w:
-        print(f"  Weather:    {w['temp_c']:.1f}°C  {w['humidity_pct']:.0f}% humidity  {w['wind_kmh']:.0f} km/h wind")
-        for msg in weather_warnings(w):
-            print(f"  ⚠  {msg}")
-
-    if is_sprint and sprint_idx is not None:
-        sk = splits[sprint_idx]
-        print(f"\n  ⚡ Final sprint detected (km {sk['km']}): {format_pace(sk['pace_s'])}/km")
-
-    print(f"\n  {'km':>4}  {'pace':>7}  {'FC':>5}  {'alt':>6}")
-    print(f"  {'─'*4}  {'─'*7}  {'─'*5}  {'─'*6}")
-    for i, sp in enumerate(splits):
-        hr_str = f"{sp['avg_hr']:.0f}" if sp.get("avg_hr") else "  —"
-        el_str = f"{sp['alt_delta']:+.1f}m" if sp["alt_delta"] is not None else "—"
-        flag   = " ⚡" if is_sprint and i == sprint_idx else ""
-        print(f"  {str(sp['km']):>4}  {format_pace(sp['pace_s']):>7}  {hr_str:>5}  {el_str:>6}{flag}")
-    return r["session"]
 
 # ─── Map tiles (OpenStreetMap) ────────────────────────────────────────────────
 
@@ -980,82 +892,3 @@ def session_file(data_dir, row):
             return os.path.join(data_dir, f)
     return None
 
-# ─── Entry point ─────────────────────────────────────────────────────────────
-
-def main():
-    global FETCH_WEATHER
-    args = sys.argv[1:]
-    if "--no-weather" in args:
-        FETCH_WEATHER = False
-        args = [a for a in args if a != "--no-weather"]
-    data_dir = os.environ.get("RUNNING_COACH_DATA", ".")
-    if "--data" in args:
-        i = args.index("--data")
-        if i + 1 >= len(args):
-            sys.exit("--data needs a folder")
-        data_dir = args[i + 1]
-        del args[i:i + 2]
-    if not os.path.isdir(data_dir):
-        sys.exit(f"Data folder not found: {data_dir}")
-    hist_file = history_path(data_dir)
-    reprocess_all = "--all" in args
-    args = [a for a in args if a != "--all"]
-    since = None
-    if "--since" in args:
-        i = args.index("--since")
-        if i + 1 >= len(args):
-            sys.exit("--since needs a date (YYYY-MM-DD)")
-        since = args[i + 1]
-        del args[i:i + 2]
-    if "--download" in args or since:
-        args = [a for a in args if a != "--download"]
-        try:
-            res = download_new_runs(data_dir, since)
-        except ValueError as e:
-            sys.exit(str(e))
-        print(f"intervals.icu: {len(res['downloaded'])} runs downloaded, {res['skipped']} already present.")
-        for n in res["downloaded"]:
-            print(f"  + {n}")
-        for n, m in res["errors"]:
-            print(f"  ! {n}: {m}")
-    raw_history = load_history(hist_file)
-    history = load_folder_history(data_dir)
-    if args:
-        files = args
-    else:
-        files, skipped = new_run_files(data_dir, raw_history, reprocess_all)
-        if skipped:
-            print(f"{skipped} sessions already in the history, skipped (use --all to reprocess them).")
-
-    if not files and history:
-        save_history(history, hist_file)
-        print("No new session.")
-        return
-    if not files:
-        print("No RUNNING file found.")
-        print("Usage: python parse_run_csv.py [--data CARTELLA] [--no-weather] [--all] [--download] [--since YYYY-MM-DD] [file.csv ...]")
-        sys.exit(1)
-
-    sessions = [s for s in (analyze(fp) for fp in files) if s]
-    if not sessions:
-        print("\nNo session analyzed.")
-        return
-    print(f"\n{len(sessions)} session(s) analyzed.")
-
-    sessions.sort(key=session_key)
-    history = merge_sessions(history, sessions)
-
-    last = sessions[-1]
-    latest = is_latest(history, last)
-    save_history(history, hist_file)
-    print(f"\n  ✓ History updated: {hist_file} ({len(history)} sessions)")
-
-    if latest:
-        recommendations(history, last)
-    else:
-        newest = history[-1]
-        print(f"\n  No recommendation: the latest session in the history is {newest['date']} {newest['time']}.")
-
-
-if __name__ == "__main__":
-    main()

@@ -74,7 +74,10 @@ class GuiSmokeTests(unittest.TestCase):
                     app.draw_chart()
                 self.assertTrue(app.canvas.find_all())
 
-                self.assertNotEqual(app.reco_vars["dist"].get(), "—")
+                app.fitness_now()                                              # the advice lives at the top of the Fitness tab
+                self.assertIn("NEXT SESSION", app.fit_summary.get("1.0", "end"))
+                self.assertIn("Distance:", app.fit_summary.get("1.0", "end"))
+                self.assertNotIn("Next session", [app.tabs.tab(t, "text") for t in app.tabs.tabs()])
 
                 app.import_now()
                 self.assertIn("0 sessions imported, 3 already present", app.status.get())
@@ -317,6 +320,83 @@ class GuiSmokeTests(unittest.TestCase):
                 self.assertEqual(len(c.find_withtag("hover")), 0)
             finally:
                 gui.core.fetch_tile = real
+                app._close()
+
+
+    def test_fitness_tab_table_summary_and_charts(self):
+        gui = load_gui()
+        with tempfile.TemporaryDirectory() as d:
+            for name, km in (("2026.04.14 07.00", 4.0), ("2026.04.21 07.00", 5.0), ("2026.04.28 07.00", 6.0), ("2026.05.05 07.00", 7.0)):
+                write_run(os.path.join(d, f"{name}-RUNNING.csv"), km=km, base_speed=2.6, icu_format=True)
+            with open(os.path.join(d, "athlete.json"), "w") as f:
+                json.dump({"hr_max": 185, "hr_rest": 55, "mass_kg": 68}, f)
+            app = gui.App(data_dir=d, config_path=os.path.join(d, "cfg.json"))
+            try:
+                app.fetch.set(False)
+                app.import_now()
+                app.update()
+                app.fitness_now()
+                self.assertEqual(len(app.fit_rows), 4)
+                self.assertEqual(len(app.adv), 4)
+                kids = app.fit_tree.get_children()
+                self.assertEqual(len(kids), 4)
+                self.assertEqual(app.fit_tree.set(kids[0], "date"), "05/05/2026")           # newest first
+                text = app.fit_summary.get("1.0", "end")
+                self.assertIn("Training status", text)
+                self.assertIn("mass 68 kg", text)
+                self.assertNotIn("No athlete.json", text)
+                app.fit_tree.selection_set(kids[0])
+                app.update()
+                self.assertIn("Zones", app.fit_detail.get("1.0", "end"))
+                app.tabs.select(1)                                                          # Charts: the canvas must be visible to be drawn
+                app.update()
+                for label in ("Fitness, CTL", "VO2max estimate (ml/kg/min)", "Pace at a fixed HR (min/km)", "Training effect (indicative)"):
+                    app.metric.set(label)
+                    app.draw_chart()
+                app.metric.set("Training effect (indicative)")
+                app.draw_chart()
+                self.assertTrue(any(app.canvas.type(i) == "oval" for i in app.canvas.find_all()))   # four points plotted
+                os.remove(os.path.join(d, "athlete.json"))
+                app.fitness_now()
+                self.assertIn("No athlete.json", app.fit_summary.get("1.0", "end"))
+            finally:
+                app._close()
+
+
+    def test_fitness_tab_computes_in_a_thread_when_opened(self):
+        gui = load_gui()
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("2026.04.14 07.00", "2026.04.21 07.00", "2026.04.28 07.00"):
+                write_run(os.path.join(d, f"{name}-RUNNING.csv"), km=4.0, base_speed=2.6, icu_format=True)
+            app = gui.App(data_dir=d, config_path=os.path.join(d, "cfg.json"))
+
+            def wait():
+                for _ in range(200):
+                    app.update()
+                    if app.fit_rows and not app.fit_stale:
+                        break
+                    time.sleep(0.05)
+
+            try:
+                app.fetch.set(False)
+                app.import_now()                                          # an import opens the Fitness tab, which computes in a thread
+                wait()
+                self.assertEqual(len(app.fit_rows), 3)
+                self.assertEqual(len(app.fit_tree.get_children()), 3)
+                self.assertIn("NEXT SESSION", app.fit_summary.get("1.0", "end"))
+                self.assertFalse(app.fit_stale)
+                # the history changes while another tab is showing: stale, but nothing is computed until a tab needs it
+                app.tabs.select(0)
+                app.update()
+                before = app.fit_thread
+                app.start_fitness()
+                self.assertTrue(app.fit_stale)
+                self.assertIs(app.fit_thread, before)
+                app.tabs.select(app.fit_tab)
+                wait()
+                self.assertFalse(app.fit_stale)
+                self.assertIsNot(app.fit_thread, before)
+            finally:
                 app._close()
 
 

@@ -87,10 +87,6 @@ class ParseRunTests(unittest.TestCase):
         new = {"date": "2026-05-07", "time": "07:51", "temp_c": ""}
         self.assertEqual(P.upsert([old], new)[0]["temp_c"], "18.0")
 
-    def test_is_latest_only_for_newest_session(self):
-        hist = [{"date": "2026-05-07", "time": "07:51"}, {"date": "2026-05-09", "time": "08:00"}]
-        self.assertFalse(P.is_latest(hist, hist[0]))
-        self.assertTrue(P.is_latest(hist, hist[1]))
 
     def test_history_mixed_formats_collapse_sort_and_keep_weather(self):
         header = ",".join(P.HISTORY_FIELDS)
@@ -144,15 +140,10 @@ class ParseRunTests(unittest.TestCase):
         self.assertEqual(P.parse_pace("07:27"), 447)
 
     def test_high_drift_adds_rest_day(self):
-        import io, contextlib
         hist = [{"date": "2026-05-01", "time": "07:00", "ef_m_beat": "0.90"},
                 {"date": "2026-05-03", "time": "07:00", "ef_m_beat": "0.92"}]
         base = {"dist_km": 5.0, "tss": 40, "_pace_s": 450}
-        def rest_for(drift):
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                P.recommendations(hist, dict(base, drift_pct=drift))
-            return int(buf.getvalue().split("Rest:")[1].split()[0])
+        rest_for = lambda drift: P.compute_recommendations(hist, dict(base, drift_pct=drift))["rest"]
         self.assertEqual(rest_for(5.0), 1)
         self.assertEqual(rest_for(6.5), 2)
 
