@@ -18,14 +18,16 @@ import parse_run_csv as core
 
 ATHLETE_FILE = "athlete.json"
 CACHE_FILE = "run_metrics_cache.json"
-CACHE_VERSION = 1                        # bump when a formula changes: the cached per-run metrics are recomputed
+CACHE_VERSION = 2                        # bump when a formula changes: the cached per-run metrics are recomputed
 DEFAULT_ATHLETE = {
     "hr_max": 190,                       # bpm
     "hr_rest": 60,                       # bpm
     "mass_kg": 70,
     "cadence_factor": None,              # 1 or 2: the CSV cadence is per foot when ~88 (x2 = steps/min); None = decide from the data
     "hr_ref": None,                      # heart rate used for "pace at a fixed heart rate"; None = 60% of the heart-rate reserve
+    "hr_max_estimated": None,            # True when hr_max is a formula or a guess, not measured: the VO2max is then also given for hr_max +- 15
 }
+HRMAX_MARGIN = 15                        # bpm: Firstbeat reports about 7-9% of VO2max error for a maximum heart rate off by this much
 MOVING_MS = 3 / 3.6                      # below 3 km/h the athlete is counted as stopped
 ZONE_EDGES = (0.5, 0.6, 0.7, 0.8, 0.9)   # fractions of the maximum heart rate (Garmin's default zones)
 RIEGEL_EXPONENT = 1.06
@@ -376,7 +378,10 @@ def run_metrics(pts, athlete, hr_ref=None, speed_ref=None):
     watts, wkg = power_estimate(S, athlete)
     pace_hr = pace_at_hr(S, hr_ref)
     hrs = [h for h in S["hr"] if h is not None]
+    guess = athlete.get("hr_max_estimated")
     return {
+        "vo2max_if_hrmax_low": vo2max_estimate(S, dict(athlete, hr_max=athlete["hr_max"] - HRMAX_MARGIN)) if guess else None,
+        "vo2max_if_hrmax_high": vo2max_estimate(S, dict(athlete, hr_max=athlete["hr_max"] + HRMAX_MARGIN)) if guess else None,
         "moving_s": sum(dt for dt, ok in zip(S["dt"], S["moving"]) if ok),
         "elapsed_s": S["t"][-1],
         "zone_s": zones, "trimp": trimp, "te": te, "recovery_h": recovery_hours(te),
@@ -540,6 +545,10 @@ def summary(rows, history, athlete, today=None):
         out["vo2max"] = statistics.median(recent)
         out["vo2max_range"] = (min(recent), max(recent))
         out["vdot_races"] = {label: race_time_of_vdot(out["vo2max"], dist) for label, dist in RACES}
+        low = [r["vo2max_if_hrmax_low"] for r in rows if r.get("vo2max_if_hrmax_low")][-5:]
+        high = [r["vo2max_if_hrmax_high"] for r in rows if r.get("vo2max_if_hrmax_high")][-5:]
+        if athlete.get("hr_max_estimated") and low and high:
+            out["vo2max_hrmax_range"] = (statistics.median(low), statistics.median(high))
     best = {}                                           # all-time best effort per distance, with the day
     for r in rows:
         for label, (secs, _) in r["best"].items():
@@ -664,7 +673,12 @@ def summary_lines(s):
     if "vo2max" in s:
         lo, hi = s["vo2max_range"]
         out.append(f"VO2max estimate: {s['vo2max']:.1f} ml/kg/min (median of the last runs, range {lo:.1f}-{hi:.1f})")
-        out.append("Race predictions from the VO2max (Daniels VDOT): " +
+        if "vo2max_hrmax_range" in s:
+            a_lo, a_hi = s["vo2max_hrmax_range"]
+            out.append(f"   the maximum heart rate is an estimate: if it is {HRMAX_MARGIN} bpm off, the VO2max is {a_lo:.1f} to {a_hi:.1f}, "
+                       "and the zones, the TRIMP and the training effect move with it")
+        out.append("Race predictions from the VO2max (Daniels VDOT: what a trained runner with this VO2max would run, optimistic for slow, "
+                   "non-racing runners): " +
                    "   ".join(f"{k} {fmt_time(v)}" for k, v in s["vdot_races"].items()))
     else:
         out.append("VO2max estimate: not enough steady stretches yet")
@@ -674,6 +688,7 @@ def summary_lines(s):
                    "training is not racing): " + "   ".join(f"{k} {fmt_time(v)}" for k, v in s["riegel_races"].items()))
     if s["best"]:
         out.append("Best efforts: " + "   ".join(f"{k} {fmt_time(v[0])} ({v[1][8:]}/{v[1][5:7]})" for k, v in s["best"].items()))
-    out.append(f"Parameters from {ATHLETE_FILE}: max HR {a['hr_max']}, resting HR {a['hr_rest']}, mass {a['mass_kg']} kg.   "
+    out.append(f"Parameters from {ATHLETE_FILE}: max HR {a['hr_max']}{' (estimated)' if a.get('hr_max_estimated') else ''}, "
+               f"resting HR {a['hr_rest']}, mass {a['mass_kg']} kg.   "
                "Every value here is an estimate: read the trends, not the decimals.")
     return out

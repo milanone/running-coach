@@ -73,7 +73,9 @@ None of the estimates is validated against a Garmin watch or a laboratory. This 
 - Reading the **chronic load** as the weekly average of the last 28 days (Garmin and Firstbeat define it as the load of the last 28 days).
 - The **performance condition** window (minutes 6-20, against the median of the previous ten runs).
 
-**Accuracy to expect.** On a real set of 35 easy runs the per-run VO2max estimate scatters by about +-10% between runs, so read the median of the last five and the trend. The maximum heart rate matters: Firstbeat reports 7-9% of error on the VO2max for 15 bpm of error on it, so use a measured value if you can.
+**Accuracy to expect.** On a real set of 35 easy runs the per-run VO2max estimate scatters by about +-10% between runs, so read the median of the last five and the trend. The maximum heart rate matters: Firstbeat reports 7-9% of error on the VO2max for 15 bpm of error on it, so use a measured value if you can. For slow jogging (below about 8 km/h, where the ACSM equation is at the edge of its validity) the
+VO2max is less certain, and the race predictions from it are optimistic: they say what a trained runner with that VO2max would run,
+not what a slow, non-racing runner will.
 
 ## GUI
 
@@ -149,7 +151,7 @@ Personal parameters are constants at the top of the script. Edit them to match y
 environment variable, read at start-up) at a separate folder: the activity CSVs are read from it and
 `running_history.csv` is written to it — for example a private data-only repository cloned next to this one.
 
-Body parameters for the advanced metrics (`hr_max`, `hr_rest`, `mass_kg`, optionally `cadence_factor` 1 or 2 and `hr_ref`) go in
+Body parameters for the advanced metrics (`hr_max`, `hr_rest`, `mass_kg`, optionally `cadence_factor` 1 or 2, `hr_ref`, and `hr_max_estimated: true` when the maximum heart rate is a formula or a guess, not measured) go in
 `athlete.json` in that folder, e.g. `{"hr_max": 190, "hr_rest": 60, "mass_kg": 70}`.
 
 ## Tests

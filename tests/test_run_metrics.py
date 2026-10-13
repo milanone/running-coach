@@ -61,6 +61,17 @@ class RunMetricsTests(unittest.TestCase):
         noisy = R.series(make_pts([(1200, 3.0, lambda k: 120 + (k % 2) * 30)]))
         self.assertIsNone(R.vo2max_estimate(noisy, ATHLETE))                                      # no steady heart rate
 
+    def test_estimated_max_heart_rate_gives_a_vo2max_range(self):
+        S = make_pts([(1200, 3.0, 138)])
+        base = R.run_metrics(S, ATHLETE)
+        self.assertIsNone(base["vo2max_if_hrmax_low"])                       # measured maximum: no range
+        guess = R.run_metrics(S, dict(ATHLETE, hr_max_estimated=True))
+        # hr_max 175: reserve 115, fraction 78 / 115 -> (39.5 - 3.5) / 0.678 + 3.5 = 56.6; hr_max 205: reserve 145 -> 70.4
+        self.assertAlmostEqual(guess["vo2max_if_hrmax_low"], 56.6, delta=0.1)
+        self.assertAlmostEqual(guess["vo2max_if_hrmax_high"], 70.4, delta=0.1)
+        self.assertLess(guess["vo2max_if_hrmax_low"], guess["vo2max"])
+        self.assertLess(guess["vo2max"], guess["vo2max_if_hrmax_high"])
+
     def test_pace_at_heart_rate_and_heart_rate_at_speed(self):
         S = R.series(make_pts([(1800, 3.0, 138)]))
         self.assertAlmostEqual(R.pace_at_hr(S, 138), 1000 / 3.0, delta=0.5)
@@ -196,6 +207,11 @@ class RunMetricsTests(unittest.TestCase):
                 other = R.compute_all(d, history, dict(ATHLETE, hr_max=180))  # other parameters: the cache is not valid
             self.assertEqual(other, [])                                       # every file was tried again (and failed here)
             self.assertGreater(len(R.run_lines(rows[-1])), 5)
+            self.assertNotIn("bpm off", text)                          # a measured maximum heart rate: no range line
+            guess = dict(ATHLETE, hr_max_estimated=True)
+            text2 = "\n".join(R.summary_lines(R.summary(R.compute_all(d, history, guess), history, guess, today=date(2026, 5, 6))))
+            self.assertIn("bpm off", text2)
+            self.assertIn("(estimated)", text2)
 
 
 if __name__ == "__main__":

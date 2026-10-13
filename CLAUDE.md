@@ -47,7 +47,7 @@ folder shown in the first one is a placeholder typed into the entry after loadin
 Pure functions (no Tk), imported by the GUI as `rm`; `run_metrics(pts, athlete, speed_ref)` returns the per-run dict, `compute_all(data_dir,
 history, athlete)` the table over the history (per-file cache `run_metrics_cache.json` keyed by file mtime, merge file mtime, athlete values,
 reference speed and `CACHE_VERSION`: bump it when a formula changes), `summary()` / `summary_lines()` the Fitness tab text, `run_lines()` the
-per-run text. The athlete's parameters (`athlete.json`: `hr_max`, `hr_rest`, `mass_kg`, `cadence_factor`, `hr_ref`) live in the private data folder
+per-run text. The athlete's parameters (`athlete.json`: `hr_max`, `hr_rest`, `mass_kg`, `cadence_factor`, `hr_ref`, `hr_max_estimated`) live in the private data folder
 and are Francesco's own; the defaults in the code are generic on purpose (this repo is public: never write his body values here).
 The GUI computes them lazily in a thread (`ensure_fitness`, only when the Fitness tab or Charts on an `adv.` metric is selected): the thread gets
 plain values and a `threading.Event` to cancel, never `self` (a Tk object released in another thread crashes with "Tcl interpreter is leaked").
@@ -82,6 +82,10 @@ What each estimate rests on, and how far it is checked (nothing here is validate
 - **Mine, not from a source**: the TE scale and the recovery time (`4 * TE^2` hours), the power coefficient 1.04, `LOW_WEEKLY_TSS` = 100 (below it a
   high ratio is "Ramping up"), the performance-condition window (minutes 6-20, median of the previous ten runs), Edwards' zone weights 1-5
   (from memory of a book).
+- Francesco runs very slowly (~7.7 km/h, 128 m/min, below the ACSM running threshold of 134 and inside the jogging range): the VO2max has an extra,
+  unknown bias (ACSM's 0.2 ml/kg/m is above the 3.4 J/kg/m = 0.16 ml/kg/m Minetti measured in 10 runners, so it may read high), and the VDOT race predictions
+  (5 km ~22 min from a VO2max of ~47) are what a trained runner would run, far from his real pace (7:50/km): the summary says so. His maximum heart
+  rate (190) is an estimate, `hr_max_estimated` is set and the VO2max is also given for +-15 bpm (it moves by about +-8%).
 - On Francesco's 35 runs the per-run VO2max estimate scatters between about 40 and 49 (+-10%), the median of five gives ~45; use the trend.
   The acute/chronic ratio with exponential averages (CTL/ATL) swung between 0.4 and 1.5 for a once-a-week runner, so the ratio uses the 7-day
   and 28-day sums instead.
