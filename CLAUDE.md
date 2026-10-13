@@ -52,15 +52,36 @@ and are Francesco's own; the defaults in the code are generic on purpose (this r
 The GUI computes them lazily in a thread (`ensure_fitness`, only when the Fitness tab or Charts on an `adv.` metric is selected): the thread gets
 plain values and a `threading.Event` to cancel, never `self` (a Tk object released in another thread crashes with "Tcl interpreter is leaked").
 
-What each estimate rests on, and how far it is checked (nothing here is validated against a Garmin or a lab):
-- **Checked against published numbers I remember, not against the papers**: the VDOT equations (Daniels-Gilbert) reproduce the VDOT 50 row of Daniels'
-  table to within seconds (5 km 19:56 vs 19:57, 10 km 41:20 vs 41:21, marathon 3:10:40 vs 3:10:49).
-- **Formulas written from memory, to confirm against the source when it is available**: ACSM running equation (`0.2 * v + 3.5`, m/min; meant for
-  speeds above ~8 km/h, Francesco jogs at ~7.7 km/h); the equivalence of %HRR and %VO2R (Swain and Leutholtz 1997); Riegel's exponent 1.06
-  (1981); Edwards' zone weights 1-5; the Garmin-style acute/chronic ratio and the 0.8-1.3 band.
-- **Mine, not from a source**: the training effect (`5 * (1 - exp(-TRIMP / 110))`) and the recovery time (`4 * TE^2` hours), the power coefficient
-  1.04 W per kg per m/s, the training-status thresholds (including `LOW_WEEKLY_TSS` = 100, below which a high ratio is "Ramping up"),
-  and the performance-condition window (minutes 6-20, median of the previous ten runs).
+What each estimate rests on, and how far it is checked (nothing here is validated against a Garmin or a lab). Sources read on 2026-10-13:
+- **Read in full**: Swain and Leutholtz 1997, *Med Sci Sports Exerc* 29:410-4, doi 10.1097/00005768-199703000-00018 (abstract via PubMed): in 63 adults on a
+  cycle ergometer %HRR versus %VO2 reserve had slope 1.00 and intercept -0.1, versus 1.12 and -11.6 for %VO2max: the basis of `vo2max_estimate`
+  (caveat: cycling, not running). Minetti et al. 2002, *J Appl Physiol* 93:1039-46, doi 10.1152/japplphysiol.01177.2001 (abstract via PubMed): the
+  metabolic cost of running is 3.40 J/kg/m on the level, independent of speed, and rises/falls with the slope: the structure of `power_estimate`
+  (the 0.31 between metabolic and the 1.04 is mine). Firstbeat white papers (full text): "Automated Fitness Level (VO2max) Estimation with
+  Heart Rate and Speed Data" (2014, updated 2017) and "EPOC Based Training Effect Assessment" (2005, updated 2012), both on firstbeat.com.
+  Garmin's manual (Training Status): the load-ratio table.
+- **From the Firstbeat VO2max paper**: their method also uses the heart rate against the speed in reliable stretches only (it drops stops, steep
+  downhills, soft ground, cardiac drift), with an age-based maximum heart rate; it reports a mean absolute error of ~5% against the lab for
+  their algorithm over 2690 runs, rising to about 9% (rate set 15 bpm too low) or 7% (15 bpm too high) when the maximum heart rate is wrong,
+  and ~5% when the real maximum is known. None of that accuracy transfers to my simplified version; the maximum heart rate matters a lot.
+- **From the Firstbeat training-effect paper**: TE is set by the PEAK EPOC reached and the athlete's activity class of the previous month, so the
+  same session scores differently for different fitness; bands 1.0-1.9 minor, 2.0-2.9 maintaining, 3.0-3.9 improving, 4.0-4.9 highly improving,
+  5.0 overreaching. My `aerobic_te` (TRIMP-based, no activity class) is NOT that method, only the same 0-5 reading; the recovery time is
+  invented.
+- **From Garmin's manual**: load ratio Low below 0.8, Optimal 0.8 to 1.4, High 1.5 to 1.9, Very high 2.0 or more, shown after two weeks; the status
+  labels are only described, with no thresholds (mine are heuristics, `training_status`). The acute (7 days) and chronic (28 days) definitions are
+  Firstbeat's; reading chronic as the weekly average of the 28 days is my assumption. Firstbeat's own advice (via Wareable) is an ideal ratio near
+  1.0 and injury risk from about 1.5.
+- **Secondary sources only (the primary text not read)**: ACSM running equation `0.2 * v + 0.9 * v * grade + 3.5` (m/min): valid above 134 m/min
+  (5 mph), or from 80 m/min (3 mph) when truly jogging, so Francesco's ~128 m/min jogging is inside the jogging range. A study of athletes
+  (Hippokratia, PubMed 24376318) found it 14.6% above the measured VO2max, but that is predicting a maximal test, not this submaximal use.
+  Riegel 1981, *American Scientist* 69(3):285-290: the exponent 1.06 is the popular rounding; a reconstruction of his own regression gives about
+  1.077 (to confirm in the paper, whose nku.edu copy my tools could not fetch); said to work best between 1.5 km and the marathon.
+  Daniels-Gilbert VDOT: the constants I use match several calculators and reproduce the VDOT 50 row of Daniels' table (5 km 19:56 vs 19:57,
+  10 km 41:20 vs 41:21, marathon 3:10:40 vs 3:10:49); the book itself was not read.
+- **Mine, not from a source**: the TE scale and the recovery time (`4 * TE^2` hours), the power coefficient 1.04, `LOW_WEEKLY_TSS` = 100 (below it a
+  high ratio is "Ramping up"), the performance-condition window (minutes 6-20, median of the previous ten runs), Edwards' zone weights 1-5
+  (from memory of a book).
 - On Francesco's 35 runs the per-run VO2max estimate scatters between about 40 and 49 (+-10%), the median of five gives ~45; use the trend.
   The acute/chronic ratio with exponential averages (CTL/ATL) swung between 0.4 and 1.5 for a once-a-week runner, so the ratio uses the 7-day
   and 28-day sums instead.

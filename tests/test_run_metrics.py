@@ -128,7 +128,7 @@ class RunMetricsTests(unittest.TestCase):
         spike = steady[:6] + [{"date": (d0 + timedelta(weeks=5, days=d)).strftime("%d/%m/%Y"), "time": "08:%02d" % d, "tss": "90"}
                               for d in (1, 2, 3, 4, 5)]
         label, _ = R.training_status(R.training_load(spike, today=d0 + timedelta(weeks=5, days=5)))
-        self.assertIn(label, ("Overreaching", "Strained"))
+        self.assertEqual(label, "Overreaching")                            # ratio ~3.3, past the 2.0 of Garmin's "very high"
 
     def test_next_session_advice(self):
         def run(day, tss, pace="6:30"):

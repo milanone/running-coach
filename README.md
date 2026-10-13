@@ -44,6 +44,37 @@ mass go in `athlete.json` in the data folder (defaults 190 bpm, 60 bpm, 70 kg), 
 The values are computed in a thread when the **Fitness** tab, or **Charts** on an advanced metric, is opened, and cached in
 `run_metrics_cache.json` in the data folder (recomputed when a CSV, the merges or `athlete.json` change).
 
+### Sources and how far each estimate is checked
+
+None of the estimates is validated against a Garmin watch or a laboratory. This is what each rests on, as of October 2026.
+
+**Sources whose text or abstract was read**
+
+| Used for | Source | What it gives |
+|---|---|---|
+| VO2max from the heart rate | Swain and Leutholtz, 1997, *Medicine & Science in Sports & Exercise* 29:410-4, [doi:10.1097/00005768-199703000-00018](https://doi.org/10.1097/00005768-199703000-00018) | In 63 adults, the percentage of heart-rate reserve equals the percentage of VO2 reserve (slope 1.00, intercept -0.1), not of VO2max. Measured on a cycle ergometer, not in running. |
+| Rough running power | Minetti et al., 2002, *Journal of Applied Physiology* 93:1039-46, [doi:10.1152/japplphysiol.01177.2001](https://doi.org/10.1152/japplphysiol.01177.2001) | The metabolic cost of running is 3.40 J/kg/m on the level, independent of speed, and changes with the slope. The coefficient 1.04 W per kg per m/s is 0.31 of that: the 0.31 (mechanical over metabolic) is an assumption, not a measured efficiency. |
+| VO2max method and its accuracy | Firstbeat, [Automated Fitness Level (VO2max) Estimation with Heart Rate and Speed Data](https://www.firstbeat.com/en/aerobic-fitness-level-vo%e2%82%82max-estimation-firstbeat-white-paper-2/), 2014, updated 2017 | The same idea (heart rate against speed, in reliable stretches only, with the maximum heart rate). Their algorithm has an error of about 5% against the laboratory over 2690 runs, and about 7-9% if the maximum heart rate is off by 15 bpm. That accuracy does **not** transfer to the simplified version here. |
+| Training effect scale | Firstbeat, [EPOC Based Training Effect Assessment](https://www.firstbeat.com/en/training-effect-firstbeat-white-paper-2/), 2005, updated 2012 | The 0-5 bands. Their value comes from the peak EPOC and the athlete's activity class of the last month; the training effect here is **not** that method (see below). |
+| Load ratio bands | Garmin manual, [Training Status](https://www8.garmin.com/manuals-apac/webhelp/marqathletegen2/EN-SG/GUID-9C1771B0-C377-4A7D-B010-548D96ADB9D4-8721.html) | Load ratio: low below 0.8, optimal 0.8 to 1.4, high 1.5 to 1.9, very high 2.0 or more. The status labels are only described there, without thresholds. |
+
+**Sources known only through secondary descriptions (the primary text was not read)**
+
+- *Race predictions from the best effort*: Riegel, "Athletic Records and Human Endurance", *American Scientist* 69(3):285-290, 1981 ([JSTOR](https://www.jstor.org/stable/27850427)). The exponent 1.06 is the popular rounding; a reconstruction of Riegel's own regression gives about 1.077, and the formula is said to work best between 1.5 km and the marathon.
+- *VO2 at a steady speed*: the ACSM running equation `0.2 x speed + 0.9 x speed x grade + 3.5` (speed in m/min), from the ACSM Guidelines for Exercise Testing and Prescription. It is described as valid above 134 m/min (8 km/h), or from 80 m/min when truly jogging. A [study of athletes](https://pubmed.ncbi.nlm.nih.gov/24376318/) found it 14.6% above the measured VO2max, but that used it to predict a maximal test, not as here.
+- *Race predictions from the VO2max*: the Daniels-Gilbert VDOT equations (J. Daniels, *Daniels' Running Formula*). The constants match several online calculators and reproduce the VDOT 50 row of Daniels' table (5 km 19:56 against 19:57, 10 km 41:20 against 41:21, marathon 3:10:40 against 3:10:49).
+- *TRIMP*: Edwards' zone weights 1 to 5 (S. Edwards, *The Heart Rate Monitor Book*, 1993), from memory of the book.
+- *Fitness, Fatigue, Form*: the usual exponential averages of 42 and 7 days of the TSS.
+
+**What is mine, not from a source**
+
+- The **training effect** (`5 x (1 - exp(-TRIMP / 110))`) and the **recovery time** (`4 x TE^2` hours): only the 0-5 reading is Firstbeat's; the scale is not calibrated against a Garmin, and Firstbeat's own does not depend on the TRIMP.
+- The **training status** labels (Productive, Maintaining, Recovery, Unproductive, Ramping up, Strained, Overreaching, Detraining) and their thresholds, including "Ramping up" below 100 TSS in 7 days.
+- Reading the **chronic load** as the weekly average of the last 28 days (Garmin and Firstbeat define it as the load of the last 28 days).
+- The **performance condition** window (minutes 6-20, against the median of the previous ten runs).
+
+**Accuracy to expect.** On a real set of 35 easy runs the per-run VO2max estimate scatters by about +-10% between runs, so read the median of the last five and the trend. The maximum heart rate matters: Firstbeat reports 7-9% of error on the VO2max for 15 bpm of error on it, so use a measured value if you can.
+
 ## GUI
 
 ```

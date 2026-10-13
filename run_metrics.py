@@ -101,8 +101,9 @@ def edwards_trimp(zones):
 
 
 def aerobic_te(trimp):
-    """A 0-5 'aerobic training effect' from the TRIMP: 5 * (1 - exp(-TRIMP / 110)). INDICATIVE ONLY: the shape follows Garmin's
-    0-5 bands but the scale is mine, not calibrated against a Garmin or against your fitness (Garmin's depends on it)."""
+    """A 0-5 'aerobic training effect' from the TRIMP: 5 * (1 - exp(-TRIMP / 110)). INDICATIVE ONLY, and not Firstbeat's method: theirs takes
+    the PEAK EPOC reached in the session (modelled from the heart rate as %VO2max) against the athlete's activity class of the last month
+    (Firstbeat white paper, 2012), neither of which is published as numbers. Only the 0-5 bands are theirs; my scale is not calibrated."""
     return 5.0 * (1.0 - math.exp(-trimp / TE_SCALE))
 
 
@@ -241,8 +242,9 @@ def cadence_stats(S, athlete):
 
 def power_estimate(S, athlete):
     """(W, W/kg): mean over the moving time of mass * speed * (1.04 + 9.81 * grade), the grade from the altitude smoothed over
-    about 30 s. A ROUGH model, not a measured power (Stryd or a Garmin sensor measure the real thing); the 1.04 is an approximation I did
-    not verify against a source."""
+    about 30 s. A ROUGH model, not a measured power (Stryd or a Garmin sensor measure the real thing). Minetti et al. 2002 (J Appl Physiol
+    93:1039, doi 10.1152/japplphysiol.01177.2001) measured a METABOLIC cost of running of 3.40 J/kg/m on the level, independent of speed;
+    1.04 is 0.31 of that, and the 0.31 (mechanical over metabolic) is my assumption, not a measured efficiency."""
     n = len(S["t"])
     alt = [a for a in S["alt"]]
     if n < 60 or any(a is None for a in alt):
@@ -440,12 +442,12 @@ def training_status(load):
         return "Detraining", f"no run for {since} days"
     if ratio is None:
         return "Not enough history", "no load yet"
-    if ratio > 1.3 and now["acute"] < LOW_WEEKLY_TSS:
+    if ratio > 1.4 and now["acute"] < LOW_WEEKLY_TSS:
         return "Ramping up", f"load ratio {ratio:.2f}, but only {now['acute']:.0f} TSS in 7 days"
-    if ratio > 1.5:
-        return "Overreaching", f"load ratio {ratio:.2f} (> 1.5)"
-    if ratio > 1.3:
-        return "Strained", f"load ratio {ratio:.2f} (1.3-1.5)"
+    if ratio >= 2.0:
+        return "Overreaching", f"load ratio {ratio:.2f} (very high: 2.0 or more in Garmin's table)"
+    if ratio > 1.4:
+        return "Strained", f"load ratio {ratio:.2f} (high: above the 0.8-1.4 optimal range of Garmin's table)"
     if ratio < 0.8:
         if change is not None and change < -0.15:
             return "Detraining", f"load ratio {ratio:.2f} and fitness down {-change * 100:.0f}% in 28 days"
@@ -578,7 +580,7 @@ def next_session(history, rows, summ, today=None):
     load = summ.get("load") if summ else None
     if load and load["chronic"] > 0 and summ["status"][0] != "Not enough history":
         ratio = load["acute"] / load["chronic"]
-        if ratio > 1.3 and load["acute"] >= LOW_WEEKLY_TSS:
+        if ratio > 1.4 and load["acute"] >= LOW_WEEKLY_TSS:
             rest = max(rest, 2)
             notes.append(("\u26a0", f"Load ratio {ratio:.2f}: the last 7 days are well above your 4-week average"))
         elif ratio < 0.8:
