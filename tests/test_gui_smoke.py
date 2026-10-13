@@ -1,4 +1,4 @@
-import json, os, sys, tempfile, unittest
+import json, os, sys, tempfile, time, unittest
 from importlib.machinery import SourceFileLoader
 import importlib.util
 
@@ -6,6 +6,15 @@ HERE = os.path.dirname(__file__)
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, ".."))
 from synth import write_run
+
+
+def write_run_bytes(**kw):
+    """Bytes of a synthetic run, as the API would serve them."""
+    with tempfile.TemporaryDirectory() as t:
+        path = os.path.join(t, "2026.05.20 07.30-RUNNING.csv")
+        write_run(path, icu_format=True, **kw)
+        with open(path, "rb") as f:
+            return f.read()
 
 try:
     import tkinter
@@ -25,7 +34,7 @@ def load_gui():
 
 @unittest.skipUnless(GUI_OK, "tkinter or a display is not available")
 class GuiSmokeTests(unittest.TestCase):
-    def test_import_detail_chart_legs_and_config(self):
+    def test_import_detail_chart_and_config(self):
         gui = load_gui()
         with tempfile.TemporaryDirectory() as d:
             for name, km in (("2026.05.05 07.00", 4.0), ("2026.05.09 18.43", 5.0), ("2026.05.15 07.10", 6.0)):
@@ -35,15 +44,12 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(json.load(open(cfg))["data_dir"], d)
             try:
                 app.fetch.set(False)
-                asked = []
-                app.ask_legs = lambda text: (asked.append(text), "heavy")[1]
                 app.update()
                 app.import_now()
                 app.update()
 
-                self.assertEqual(len(asked), 1)
                 self.assertEqual(len(app.tree.get_children()), 3)
-                self.assertIn("heavy", open(os.path.join(d, "running_history.csv")).read())
+                self.assertNotIn("legs", open(os.path.join(d, "running_history.csv")).read())
 
                 app.tree.selection_set(app.tree.get_children()[1])
                 app.update()
@@ -59,11 +65,6 @@ class GuiSmokeTests(unittest.TestCase):
                 app.sort_by("dist_km")
                 self.assertEqual(km(), ["6.0", "5.0", "4.0"])
                 self.assertIn("▼", app.tree.heading("dist_km")["text"])
-                app.sort_by("legs")
-                self.assertEqual(app.tree.set(app.tree.get_children()[0], "legs"), "heavy")
-                app.sort_by("legs")
-                self.assertEqual(app.tree.set(app.tree.get_children()[0], "legs"), "heavy")
-                self.assertEqual(app.tree.set(app.tree.get_children()[-1], "legs"), "")
                 app.sort_by("date")
                 self.assertEqual(app.tree.set(app.tree.get_children()[0], "date"), "15/05/2026")
                 app.sort_by("date")
@@ -73,27 +74,30 @@ class GuiSmokeTests(unittest.TestCase):
                     app.draw_chart()
                 self.assertTrue(app.canvas.find_all())
 
-                app.legs_var.set("sore")
-                app.save_legs()
-                self.assertEqual(app.selected_row()["legs"], "sore")
                 self.assertNotEqual(app.reco_vars["dist"].get(), "—")
 
                 app.import_now()
                 self.assertIn("0 sessions imported, 3 already present", app.status.get())
+
+                # "Download new sessions from intervals.icu": fake API, the new run lands in the data folder
+                stream = write_run_bytes(km=4.5)
+                core = gui.core
+                core.intervals_get = lambda path, key: (
+                    json.dumps([{"id": "i9", "type": "Run", "start_date_local": "2026-05-20T07:30:00"}]).encode()
+                    if "/activities" in path else stream)
+                core.read_api_key = lambda data_dir=None: "k"
+                app.start_import(download=True)
+                for _ in range(100):
+                    app.update()
+                    if not app.busy:
+                        break
+                    time.sleep(0.1)
+                self.assertTrue(os.path.exists(os.path.join(d, "2026.05.20 07.30-RUNNING.csv")))
+                self.assertIn("1 runs downloaded", app.status.get())
+                self.assertEqual(len(app.tree.get_children()), 4)
             finally:
                 app._close()
             self.assertEqual(json.load(open(cfg))["data_dir"], d)
-
-    def test_legs_dialog_returns_choice(self):
-        gui = load_gui()
-        root = tkinter.Tk()
-        try:
-            dlg = gui.LegsDialog(root, "?", default="ok")
-            dlg.var.set("fresh")
-            dlg._ok()
-            self.assertEqual(dlg.choice, "fresh")
-        finally:
-            root.destroy()
 
 
 if __name__ == "__main__":

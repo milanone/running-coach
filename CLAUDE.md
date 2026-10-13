@@ -36,21 +36,35 @@ folder shown in the first one is a placeholder typed into the entry after loadin
   `compute_recommendations`, the history I/O (`load_history`, `save_history`, `upsert`, `merge_sessions`) and
   `analyze_file` / `import_sessions` used by the GUI. Personal parameters are constants at the top (`THRESHOLD_HR`,
   `EF_BASELINE`, the `DRIFT_*` thresholds...).
-- `running-coach-gui.pyw`: class `App` (Tkinter): History tab (sortable table, per-km detail, legs editor), Charts tab
+- `running-coach-gui.pyw`: class `App` (Tkinter): History tab (sortable table, per-km detail), Charts tab
   (hand-drawn on a `tk.Canvas`, with a 3-session moving average), Next session tab. The import runs in a thread and
   reports through a queue polled by `_poll`; `import_now()` is the synchronous version used by the tests.
   The data folder is remembered in `~/.running_coach_gui.json`.
 
+## intervals.icu download
+
+`download_new_runs()` lists the activities (`/athlete/0/activities`, `0` = the athlete of the key, or `$INTERVALS_ATHLETE_ID`),
+keeps `Run` / `TrailRun` / `VirtualRun`, and saves `/activity/<id>/streams.csv` as `YYYY.MM.DD HH.MM-RUNNING.csv` (local start)
+unless the file exists. The streams are byte-identical to the manual export (checked on the 16 runs already in the data folder).
+Why this and not the Health Sync TCX/FIT files in Drive: their lap distance is unreliable (doubled, halved, or wrong) and early runs
+have a bad GPS start; intervals.icu already "cooks" the distance. Gotchas: a `User-Agent` header is mandatory (Cloudflare answers
+403 / error 1010 to the default Python one); the key comes from `$INTERVALS_API_KEY` or `intervals_api_key.txt` (gitignored, and
+excluded from the Drive mirror in `mirror_to_drive.bat`; never print it). Tests mock `intervals_get`; no test touches the network.
+Verified live on 2026-10-13: 37 runs listed since April, 16 identical to the existing files, 21 new (June-October).
+
 ## History file format
 
 Columns (`HISTORY_FIELDS`): `date` (dd/mm/yyyy), `time`, `dist_km`, `duration_hms`, `pace_minkm`, `avg_hr_bpm`,
-`ef_m_beat`, `drift_pct`, `tss`, `temp_c`, `humidity_pct`, `wind_kmh`, `legs` (`fresh` / `ok` / `heavy` / `sore`).
-Sessions are keyed by (ISO date, time), dates are accepted as dd/mm/yyyy or yyyy-mm-dd, and a re-import keeps the weather and
-legs already recorded.
+`ef_m_beat`, `drift_pct`, `tss`, `temp_c`, `humidity_pct`, `wind_kmh`.
+Sessions are keyed by (ISO date, time), dates are accepted as dd/mm/yyyy or yyyy-mm-dd, and a re-import keeps the weather already recorded.
+
+**Legs removed (2026-10-13):** the subjective "legs" rating (`legs`, asked after each run, +1 rest day / shorter run / slower
+pace when sore) was dropped from the history, the CLI prompt, the GUI and `compute_recommendations(history, session)`; the advice
+now rests on TSS, drift and EF trend only. Old history files with a `legs` / `gambe` column still load (the column is ignored
+and disappears on the next save).
 
 **Translation (2026-10-08):** the columns used to be Italian (`data, orario, dist_km, durata_hms, passo_minkm,
-fc_media_bpm, ef_m_batt, drift_pct, tss, temp_c, umidita_pct, vento_kmh, gambe`) and `legs` was
-`fresche/ok/pesanti/dolenti`. `LEGACY_FIELDS` / `LEGACY_LEGS` / `migrate_legacy_row()` read such files, which are rewritten
+fc_media_bpm, ef_m_batt, drift_pct, tss, temp_c, umidita_pct, vento_kmh, gambe`). `LEGACY_FIELDS` / `migrate_legacy_row()` read such files, which are rewritten
 with the English names on the next save; `test_legacy_italian_history_is_read_and_migrated` covers it. The private
 `running_coach_data/running_history.csv` has **not** been touched: it migrates the first time the app saves it.
 
@@ -68,6 +82,6 @@ charts to matplotlib with PlotStyleKit (consistent style, figure save/edit) woul
 
 ## Editing conventions (project)
 - Follow `..\CLAUDE.md`: everything in English, surgical edits. The project was translated from Italian in one pass
-  (console output, GUI, column names, `legs` values, tests); `howto.txt` is a personal, gitignored note and stays in
+  (console output, GUI, column names, tests); `howto.txt` is a personal, gitignored note and stays in
   Italian.
 - Never commit anything from the data folder.

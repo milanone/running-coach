@@ -30,7 +30,7 @@ METRICS = [
 TABLE_COLUMNS = [
     ("date", "Date", 90), ("time", "Time", 50), ("dist_km", "km", 55), ("duration_hms", "Duration", 75),
     ("pace_minkm", "Pace", 60), ("avg_hr_bpm", "HR", 50), ("ef_m_beat", "EF", 60),
-    ("drift_pct", "Drift %", 65), ("tss", "TSS", 45), ("temp_c", "°C", 45), ("legs", "Legs", 75),
+    ("drift_pct", "Drift %", 65), ("tss", "TSS", 45), ("temp_c", "°C", 45),
 ]
 
 
@@ -50,33 +50,6 @@ def save_config(path, cfg):
         pass
 
 
-class LegsDialog(tk.Toplevel):
-    """Modal dialog asking how the legs feel; result in .choice (None if cancelled)."""
-
-    def __init__(self, parent, text, default="ok"):
-        super().__init__(parent)
-        self.title("How do your legs feel")
-        self.transient(parent)
-        self.resizable(False, False)
-        self.choice = None
-        ttk.Label(self, text=text, padding=12, justify="left").pack()
-        self.var = tk.StringVar(value=default)
-        for opt in core.LEG_OPTIONS:
-            ttk.Radiobutton(self, text=opt, value=opt, variable=self.var).pack(anchor="w", padx=24)
-        row = ttk.Frame(self, padding=12)
-        row.pack(fill="x")
-        ttk.Button(row, text="Skip", command=self.destroy).pack(side="right", padx=4)
-        ttk.Button(row, text="OK", command=self._ok).pack(side="right")
-        self.bind("<Return>", lambda e: self._ok())
-        self.bind("<Escape>", lambda e: self.destroy())
-        self.grab_set()
-        self.focus_set()
-
-    def _ok(self):
-        self.choice = self.var.get()
-        self.destroy()
-
-
 class App(tk.Tk):
     def __init__(self, data_dir=None, config_path=CONFIG_PATH):
         super().__init__()
@@ -90,7 +63,9 @@ class App(tk.Tk):
         self.queue = queue.Queue()
         self.busy = False
 
-        self.data_dir = tk.StringVar(value=data_dir or os.environ.get("RUNNING_COACH_DATA") or cfg.get("data_dir", ""))
+        sibling = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "running_coach_data")
+        self.data_dir = tk.StringVar(value=data_dir or os.environ.get("RUNNING_COACH_DATA") or cfg.get("data_dir", "")
+                                     or (sibling if os.path.isdir(sibling) else ""))
         self.fetch = tk.BooleanVar(value=cfg.get("fetch_weather", True))
         self.metric = tk.StringVar(value=METRICS[0][0])
         self.status = tk.StringVar(value="")
@@ -117,6 +92,9 @@ class App(tk.Tk):
         self.btn_import.pack(side="left")
         self.btn_all = ttk.Button(bar, text="Reprocess all", command=self.reprocess_all)
         self.btn_all.pack(side="left", padx=(6, 0))
+        self.btn_download = ttk.Button(bar, text="Download new sessions from intervals.icu",
+                                       command=lambda: self.start_import(download=True))
+        self.btn_download.pack(side="left", padx=(6, 0))
 
     def _build_tabs(self):
         self.tabs = ttk.Notebook(self)
@@ -142,8 +120,6 @@ class App(tk.Tk):
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
-        self.tree.tag_configure("sore", background="#fde2e2")
-        self.tree.tag_configure("heavy", background="#fff1d6")
         self.tree.bind("<<TreeviewSelect>>", lambda e: self.show_detail())
 
         bottom = ttk.Frame(paned, padding=(0, 6, 0, 0))
@@ -153,14 +129,6 @@ class App(tk.Tk):
         self.detail = tk.Text(left, height=12, width=52, state="disabled", wrap="word", relief="flat",
                               background=self.cget("background"), font=("TkDefaultFont", 10))
         self.detail.pack(fill="both", expand=True)
-        legs = ttk.Frame(left)
-        legs.pack(fill="x", pady=(4, 0))
-        ttk.Label(legs, text="Legs:").pack(side="left")
-        self.legs_var = tk.StringVar()
-        self.legs_box = ttk.Combobox(legs, textvariable=self.legs_var, values=[""] + core.LEG_OPTIONS,
-                                     width=10, state="readonly")
-        self.legs_box.pack(side="left", padx=6)
-        ttk.Button(legs, text="Save", command=self.save_legs).pack(side="left")
 
         right = ttk.Frame(bottom)
         right.pack(side="left", fill="both", expand=True, padx=(10, 0))
@@ -218,7 +186,7 @@ class App(tk.Tk):
         self.history = core.load_history(core.history_path(d)) if d else []
         if d:
             self._save_config()
-        for b in (self.btn_import, self.btn_all):
+        for b in (self.btn_import, self.btn_all, self.btn_download):
             b.state(["!disabled"] if d else ["disabled"])
         self.refresh_table()
         self.draw_chart()
@@ -235,8 +203,7 @@ class App(tk.Tk):
         self.tree.delete(*self.tree.get_children())
         for r in self.sorted_history():
             iid = "|".join(core.session_key(r))
-            self.tree.insert("", "end", iid=iid, values=[r.get(k, "") for k, _, _ in TABLE_COLUMNS],
-                             tags=(r.get("legs", ""),))
+            self.tree.insert("", "end", iid=iid, values=[r.get(k, "") for k, _, _ in TABLE_COLUMNS])
         kids = self.tree.get_children()
         target = select if select in kids else (kids[0] if kids else None)
         if target:
@@ -261,8 +228,6 @@ class App(tk.Tk):
                 return h * 3600 + m * 60 + sec
             except ValueError:
                 return None
-        if key == "legs":
-            return core.LEG_OPTIONS.index(raw) if raw in core.LEG_OPTIONS else None
         return core.safe_float(raw)
 
     def sorted_history(self):
@@ -304,9 +269,7 @@ class App(tk.Tk):
         row = self.selected_row()
         if not row:
             self._write_detail("")
-            self.legs_var.set("")
             return
-        self.legs_var.set(row.get("legs", ""))
         lines = [f"{row['date']} {row['time']}   {row['dist_km']} km   {row['duration_hms']}   {row['pace_minkm']}/km",
                  f"HR {row['avg_hr_bpm']} bpm   EF {row['ef_m_beat']}   Drift {row['drift_pct']}%   TSS {row['tss']}"]
         if row.get("temp_c"):
@@ -335,16 +298,6 @@ class App(tk.Tk):
                         f"+{sp['elev_gain']:.0f}" if sp["elev_gain"] > 0.5 else "—",
                         "⚡ sprint" if res["is_sprint"] and i == res["sprint_idx"] else ""))
         self._write_detail("\n".join(lines))
-
-    def save_legs(self):
-        row = self.selected_row()
-        if row is None:
-            return
-        row["legs"] = self.legs_var.get()
-        self.save_history()
-        self.refresh_table(select="|".join(core.session_key(row)))
-        self.refresh_reco()
-        self.status.set(f"Legs of {row['date']} updated.")
 
     # ── chart ────────────────────────────────────────────────────────────
     def draw_chart(self):
@@ -418,10 +371,9 @@ class App(tk.Tk):
             self.reco_head.configure(text="No session in the history.")
             return
         last = sorted(self.history, key=core.session_key)[-1]
-        legs = last.get("legs") or "ok"
-        rec = core.compute_recommendations(self.history, last, legs)
+        rec = core.compute_recommendations(self.history, last)
         self.reco_head.configure(text=f"After the run of {last['date']} {last['time']} "
-                                      f"({last['dist_km']} km, legs: {last.get('legs') or 'not set'}):")
+                                      f"({last['dist_km']} km):")
         n = rec["rest"]
         self.reco_vars["rest"].set(f"{n} {'day' if n == 1 else 'days'}")
         self.reco_vars["dist"].set(f"{rec['dist_km']:.1f} km")
@@ -432,21 +384,24 @@ class App(tk.Tk):
     # ── import ───────────────────────────────────────────────────────────
     def set_busy(self, busy, msg=""):
         self.busy = busy
-        for b in (self.btn_import, self.btn_all):
+        for b in (self.btn_import, self.btn_all, self.btn_download):
             b.state(["disabled"] if busy or not self._dir() else ["!disabled"])
         if msg:
             self.status.set(msg)
 
-    def start_import(self, reprocess=False):
+    def start_import(self, reprocess=False, download=False):
         d = self._dir()
         if not d or self.busy:
             return
-        self.set_busy(True, "Analysing the CSVs…")
+        self.set_busy(True, "Downloading new sessions from intervals.icu…" if download else "Analysing the CSVs…")
         fetch = self.fetch.get()
 
         def work():
             try:
-                self.queue.put(("done", core.import_sessions(d, fetch, reprocess)))
+                got = core.download_new_runs(d) if download else None
+                res = core.import_sessions(d, fetch, reprocess)
+                res["download"] = got
+                self.queue.put(("done", res))
             except Exception as e:  # reported on the UI thread
                 self.queue.put(("error", e))
 
@@ -455,7 +410,7 @@ class App(tk.Tk):
     def reprocess_all(self):
         if messagebox.askyesno("Reprocess all",
                                "Recompute every run from the CSVs and overwrite the metrics in the history "
-                               "(weather and legs already recorded are kept). Continue?"):
+                               "(weather already recorded is kept). Continue?"):
             self.start_import(reprocess=True)
 
     def import_now(self, reprocess=False):
@@ -475,27 +430,21 @@ class App(tk.Tk):
             pass
         self.after(150, self._poll)
 
-    def ask_legs(self, text):
-        dlg = LegsDialog(self, text)
-        self.wait_window(dlg)
-        return dlg.choice
-
     def finish_import(self, result):
         self.set_busy(False)
         sessions, errors = result["sessions"], result["errors"]
         history = core.merge_sessions(result["history"], sessions)
-        if sessions:
-            newest = sessions[-1]
-            if core.is_latest(history, newest):
-                legs = self.ask_legs(f"How do your legs feel after the run of {newest['date']} {newest['time']}?")
-                if legs:
-                    newest["legs"] = legs
         self.history = history
         self.save_history()
         self.refresh_table()
         self.draw_chart()
         self.refresh_reco()
+        got = result.get("download")
         msg = f"{len(sessions)} sessions imported, {result['skipped']} already present"
+        if got:
+            msg = f"{len(got['downloaded'])} runs downloaded, " + msg
+        if got and got["errors"]:
+            errors = errors + got["errors"]
         if errors:
             msg += f", {len(errors)} unreadable files"
         self.status.set(msg + ".")

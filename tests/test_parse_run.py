@@ -1,4 +1,4 @@
-import os, sys, tempfile, unittest
+import json, os, sys, tempfile, unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -68,16 +68,16 @@ class ParseRunTests(unittest.TestCase):
         self.assertFalse(P.detect_sprint(splits)[0])
 
     def test_history_upsert_dedups_same_session(self):
-        a = {"date": "2026-05-07", "time": "07:00", "legs": "ok"}
-        b = {"date": "2026-05-07", "time": "07:00", "legs": "sore"}
+        a = {"date": "2026-05-07", "time": "07:00", "dist_km": "4.0"}
+        b = {"date": "2026-05-07", "time": "07:00", "dist_km": "4.5"}
         rows = P.upsert(P.upsert([], a), b)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["legs"], "sore")
+        self.assertEqual(rows[0]["dist_km"], "4.5")
 
-    def test_upsert_keeps_recorded_legs_when_reprocessed(self):
-        old = {"date": "2026-05-07", "time": "07:51", "legs": "sore"}
-        new = {"date": "2026-05-07", "time": "07:51", "legs": ""}
-        self.assertEqual(P.upsert([old], new)[0]["legs"], "sore")
+    def test_upsert_keeps_recorded_weather_when_reprocessed(self):
+        old = {"date": "2026-05-07", "time": "07:51", "temp_c": "18.0"}
+        new = {"date": "2026-05-07", "time": "07:51", "temp_c": ""}
+        self.assertEqual(P.upsert([old], new)[0]["temp_c"], "18.0")
 
     def test_is_latest_only_for_newest_session(self):
         hist = [{"date": "2026-05-07", "time": "07:51"}, {"date": "2026-05-09", "time": "08:00"}]
@@ -108,11 +108,11 @@ class ParseRunTests(unittest.TestCase):
         self.assertEqual(may7["temp_c"], "18.0")
         self.assertEqual(may7["duration_hms"], "00:42:00")
         self.assertEqual(may7["pace_minkm"], "08:45")
-        self.assertEqual(may7["legs"], "ok")
+        self.assertNotIn("legs", may7)
         self.assertEqual(may7["drift_pct"], "5.0")
 
     def test_legacy_italian_history_is_read_and_migrated(self):
-        # history files written by earlier versions: Italian column names and `legs` values
+        # history files written by earlier versions: Italian column names and the dropped `gambe` column
         header = "data,orario,dist_km,durata_hms,passo_minkm,fc_media_bpm,ef_m_batt,drift_pct,tss,temp_c,umidita_pct,vento_kmh,gambe"
         lines = [header,
                  "16/04/2026,19:16,3.02,00:21:12,07:01,151,0.943,-4.92,28,16.6,84,17.1,dolenti",
@@ -123,13 +123,12 @@ class ParseRunTests(unittest.TestCase):
             with open(path, "w", newline="") as f:
                 f.write(chr(10).join(lines))
             rows = P.load_history(path)
-            self.assertEqual([r["legs"] for r in rows], ["sore", "fresh", "heavy"])
             self.assertEqual(rows[0]["humidity_pct"], "84")
             self.assertEqual(rows[0]["avg_hr_bpm"], "151")
             P.save_history(rows, path)                      # saved with the English header
             with open(path) as f:
                 self.assertEqual(f.readline().strip(), ",".join(P.HISTORY_FIELDS))
-            self.assertEqual([r["legs"] for r in P.load_history(path)], ["sore", "fresh", "heavy"])
+            self.assertEqual([r["humidity_pct"] for r in P.load_history(path)], ["84", "41", "60"])
 
     def test_pace_and_duration_formats(self):
         self.assertEqual(P.pace_csv(447), "07:27")
@@ -144,7 +143,7 @@ class ParseRunTests(unittest.TestCase):
         def rest_for(drift):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                P.recommendations(hist, dict(base, drift_pct=drift), "ok")
+                P.recommendations(hist, dict(base, drift_pct=drift))
             return int(buf.getvalue().split("Rest:")[1].split()[0])
         self.assertEqual(rest_for(5.0), 1)
         self.assertEqual(rest_for(6.5), 2)
@@ -162,9 +161,52 @@ class ParseRunTests(unittest.TestCase):
             open(os.path.join(d, "2026.05.08 07.00-RUNNING.csv"), "w").write("time\n0\n")
             bad = P.import_sessions(d, fetch=False)
             self.assertEqual(len(bad["errors"]), 1)
-        rec = P.compute_recommendations(history, history[0], "sore")
-        self.assertEqual(rec["rest"], 2)
-        self.assertTrue(any("Sore legs" in t for _, t in rec["notes"]))
+        rec = P.compute_recommendations(history, history[0])
+        self.assertGreaterEqual(rec["rest"], 1)
+        self.assertGreater(rec["dist_km"], 0)
+
+    def test_run_filename_uses_local_start(self):
+        self.assertEqual(P.run_filename("2026-10-12T08:28:32"), "2026.10.12 08.28-RUNNING.csv")
+
+    def test_download_new_runs_filters_types_and_skips_existing(self):
+        acts = [{"id": "i1", "type": "Run", "start_date_local": "2026-10-07T08:59:57"},
+                {"id": "i2", "type": "Walk", "start_date_local": "2026-10-09T12:15:43"},
+                {"id": "i3", "type": "Run", "start_date_local": "2026-10-12T08:28:32"},
+                {"id": "i4", "type": "Run", "start_date_local": "2026-10-13T08:00:00"}]
+        stream = b"time,heartrate\n" + b"0,100\n" * 8
+        calls = []
+
+        def fake_get(path, key):
+            calls.append(path)
+            if "/activities" in path:
+                return json.dumps(acts).encode()
+            return b"time\n" if "i4" in path else stream
+
+        old = P.intervals_get
+        P.intervals_get = fake_get
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                open(os.path.join(d, "2026.10.07 08.59-RUNNING.csv"), "w").close()
+                res = P.download_new_runs(d, since="2026-10-01", key="k")
+                self.assertEqual(res["downloaded"], ["2026.10.12 08.28-RUNNING.csv"])
+                self.assertEqual(res["skipped"], 1)
+                self.assertEqual([n for n, _ in res["errors"]], ["2026.10.13 08.00-RUNNING.csv"])
+                self.assertFalse(any("i2" in c for c in calls))        # walks are never fetched
+                with open(os.path.join(d, res["downloaded"][0]), "rb") as f:
+                    self.assertEqual(f.read(), stream)                   # bytes kept as served
+        finally:
+            P.intervals_get = old
+
+    def test_download_without_key_raises(self):
+        old = os.environ.pop("INTERVALS_API_KEY", None)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                if P.read_api_key(d) is None:                            # no key file next to the program
+                    with self.assertRaises(ValueError):
+                        P.download_new_runs(d)
+        finally:
+            if old is not None:
+                os.environ["INTERVALS_API_KEY"] = old
 
     def test_ef_and_tss(self):
         self.assertAlmostEqual(P.compute_ef(5.0, 2250, 155), 5000 / (155 * 37.5), places=3)

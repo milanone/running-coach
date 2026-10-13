@@ -27,10 +27,13 @@ py running-coach-gui.pyw        # or double-click the file (Windows opens it wit
 Pick the data folder (the one with the `YYYY.MM.DD HH.MM-RUNNING.csv` files and `running_history.csv`;
 it is remembered in `~/.running_coach_gui.json`), then:
 
-- **Import new runs** analyses only the CSVs not yet in the history and asks how your legs feel
-  after the newest one. **Reprocess all** recomputes every session (weather and legs are kept).
-- **History** lists all sessions; select one to see the per-km splits, sprint note and weather, and
-  change its leg condition.
+- **Download new sessions from intervals.icu** fetches the per-second streams of the runs not yet in the folder
+  (running only, saved as `YYYY.MM.DD HH.MM-RUNNING.csv`) and then imports them. It needs your intervals.icu API key
+  (Settings → Developer Settings): put it in `intervals_api_key.txt` next to the program (gitignored) or in the
+  `INTERVALS_API_KEY` environment variable. From the command line: `py parse_run_csv.py --download [--since YYYY-MM-DD]`.
+- **Import new runs** analyses only the CSVs not yet in the history. **Reprocess all**
+  recomputes every session (the weather already recorded is kept).
+- **History** lists all sessions; select one to see the per-km splits, sprint note and weather.
 - **Charts** plots distance, pace, heart rate, EF, drift or TSS over time with a 3-session moving average.
 - **Next session** shows the recommended rest, distance and pace.
 
@@ -49,8 +52,7 @@ python parse_run_csv.py --data ..\\running-coach-data   # read CSVs and keep run
 1. Export the activity as CSV from intervals.icu.
 2. Rename it to `YYYY.MM.DD HH.MM-RUNNING.csv` (date and start time of the run) and put it
    next to the script.
-3. Run the script. It asks how your legs feel (fresh / ok / heavy / sore) and uses the answer
-   in the recommendations for the next session.
+3. Run the script.
 
 It prints a per-km breakdown, EF, cardiac drift, TSS, automatic sprint detection (final km)
 and recommendations for the next session (rest days, distance, pace), then appends or updates
@@ -65,10 +67,10 @@ to an external service.
 ## The history file
 
 `running_history.csv` has one row per session with the columns `date` (dd/mm/yyyy), `time`, `dist_km`, `duration_hms`,
-`pace_minkm`, `avg_hr_bpm`, `ef_m_beat`, `drift_pct`, `tss`, `temp_c`, `humidity_pct`, `wind_kmh` and `legs`
-(`fresh`, `ok`, `heavy` or `sore`). Files written by earlier versions (Italian column names such as `data`, `orario`,
-`gambe` and the values `fresche`, `pesanti`, `dolenti`) are read as they are and rewritten with the English names
-the next time the history is saved.
+`pace_minkm`, `avg_hr_bpm`, `ef_m_beat`, `drift_pct`, `tss`, `temp_c`, `humidity_pct`, and `wind_kmh`.
+The recommendations use only objective data (TSS, cardiac drift, EF trend); the former subjective "legs" rating was
+removed. Files written by earlier versions (Italian column names such as `data`, `orario`, and the `gambe` / `legs`
+column) are still read: the names are translated and the legs column is dropped the next time the history is saved.
 
 ## Configuration
 

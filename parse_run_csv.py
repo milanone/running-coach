@@ -6,6 +6,7 @@ parse_run_csv.py – Running activity analyzer for intervals.icu CSV exports
 Usage:
     python parse_run_csv.py             # process all YYYY.MM.DD HH.MM-RUNNING.csv
     python parse_run_csv.py file.csv    # single file
+    python parse_run_csv.py --download  # first fetch the new runs from intervals.icu (API key needed)
 
 Output:
     - Per-km breakdown table
@@ -16,7 +17,8 @@ Output:
     - Appends/updates running_history.csv
 """
 
-import sys, csv, os, math, re
+import sys, csv, os, math, re, json, base64
+import urllib.request
 from datetime import datetime, timedelta
 
 # ─── Constants ────────────────────────────────────────────────────────────────
@@ -38,12 +40,12 @@ HISTORY_FILE    = "running_history.csv"
 LEGACY_FIELDS   = {
     "data": "date", "orario": "time", "durata_hms": "duration_hms", "passo_minkm": "pace_minkm",
     "fc_media_bpm": "avg_hr_bpm", "ef_m_batt": "ef_m_beat", "umidita_pct": "humidity_pct",
-    "vento_kmh": "wind_kmh", "gambe": "legs",
+    "vento_kmh": "wind_kmh",
 }
 HISTORY_FIELDS  = [
     "date", "time", "dist_km", "duration_hms", "pace_minkm",
     "avg_hr_bpm", "ef_m_beat", "drift_pct", "tss",
-    "temp_c", "humidity_pct", "wind_kmh", "legs",
+    "temp_c", "humidity_pct", "wind_kmh",
 ]
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
@@ -457,7 +459,7 @@ def session_key(r):
 
 def upsert(records, rec):
     """Deduplicate by (date, time) across date formats; the new record wins, but fields it
-    leaves empty (weather, `legs`) keep the previously recorded value."""
+    leaves empty (weather) keep the previously recorded value."""
     for i, r in enumerate(records):
         if session_key(r) == session_key(rec):
             for k in HISTORY_FIELDS:
@@ -481,11 +483,10 @@ def normalize_row(r):
 
 
 def migrate_legacy_row(r):
-    """Rows written by earlier versions had Italian column names (data, orario, ...) and Italian `legs`
-    values; they are read as the English ones and written back that way on the next save."""
-    r = {LEGACY_FIELDS.get(k, k): v for k, v in r.items() if k is not None}
-    r["legs"] = LEGACY_LEGS.get(r.get("legs", ""), r.get("legs", ""))
-    return r
+    """Rows written by earlier versions had Italian column names (data, orario, ...); they are read as
+    the English ones and written back that way on the next save. The old subjective `legs` / `gambe`
+    column is no longer in HISTORY_FIELDS, so it is dropped on the next save."""
+    return {LEGACY_FIELDS.get(k, k): v for k, v in r.items() if k is not None}
 
 
 def history_path(data_dir):
@@ -526,20 +527,7 @@ def merge_sessions(history, sessions):
 
 # ─── Recommendations ─────────────────────────────────────────────────────────
 
-LEG_OPTIONS = ["fresh", "ok", "heavy", "sore"]
-# Values written by earlier versions (Italian) and read back by load_history
-LEGACY_LEGS = {"fresche": "fresh", "pesanti": "heavy", "dolenti": "sore"}
-
-
-def get_leg_condition():
-    print("\nHow do your legs feel:")
-    for i, v in enumerate(LEG_OPTIONS, 1):
-        print(f"  {i}) {v}")
-    ch = input("Choice [1-4, default 2]: ").strip() or "2"
-    return LEG_OPTIONS[int(ch) - 1] if ch in "1234" and len(ch) == 1 else "ok"
-
-
-def compute_recommendations(history, session, legs):
+def compute_recommendations(history, session):
     """Next-session advice: {rest, dist_km, pace_s, ef_trend, notes: [(icon, text)]}."""
     hist = sorted(history, key=session_key)
     recent = hist[-4:]
@@ -557,27 +545,20 @@ def compute_recommendations(history, session, legs):
     rest = 1
     if tss > 80:  rest += 1
     if tss > 120: rest += 1
-    if legs == "sore": rest += 1
     if drift is not None and drift > DRIFT_HIGH: rest += 1
     rest = min(rest, 4)
 
     dist_rec = dist
     if ef_trend == "improving" and (drift is None or drift < DRIFT_PROGRESS):
         dist_rec = round(dist * 1.08, 1)   # +8% load progression
-    elif legs in ("sore", "heavy") or (drift is not None and drift > DRIFT_VERY_HIGH):
+    elif drift is not None and drift > DRIFT_VERY_HIGH:
         dist_rec = round(dist * 0.85, 1)   # recovery run
 
     pace_rec = pace
-    if legs == "sore":
-        pace_rec += 20
-    elif ef_trend == "improving" and (drift is None or drift < DRIFT_INTENSIFY):
+    if ef_trend == "improving" and (drift is None or drift < DRIFT_INTENSIFY):
         pace_rec -= 5
 
     notes = []
-    if legs == "sore":
-        notes.append(("⚠", "Sore legs → reduced load, +1 rest day"))
-    elif legs == "fresh":
-        notes.append(("✓", "Fresh legs → you can push"))
     if drift is not None and drift > DRIFT_HIGH:
         notes.append(("⚠", f"High drift ({drift:.1f}%) → accumulated fatigue"))
     elif drift is not None and drift < DRIFT_LOW:
@@ -585,8 +566,8 @@ def compute_recommendations(history, session, legs):
     return {"rest": rest, "dist_km": dist_rec, "pace_s": pace_rec, "ef_trend": ef_trend, "notes": notes}
 
 
-def recommendations(history, session, legs):
-    rec = compute_recommendations(history, session, legs)
+def recommendations(history, session):
+    rec = compute_recommendations(history, session)
     rest = rec["rest"]
     print("\n" + "═" * 52)
     print("  RECOMMENDED NEXT SESSION")
@@ -661,7 +642,6 @@ def analyze_file(filepath, fetch=None):
         "temp_c":       weather["temp_c"]      if weather else "",
         "humidity_pct":  weather["humidity_pct"] if weather else "",
         "wind_kmh":    weather["wind_kmh"]   if weather else "",
-        "legs":        "",
     }
     return {"session": session, "splits": splits, "is_sprint": is_sprint, "sprint_idx": sprint_idx,
             "elev": elev, "avg_hr": avg_hr, "weather": weather, "start": start_ts, "dur_s": dur_s,
@@ -715,6 +695,81 @@ def analyze(filepath):
         flag   = " ⚡" if is_sprint and i == sprint_idx else ""
         print(f"  {str(sp['km']):>4}  {format_pace(sp['pace_s']):>7}  {hr_str:>5}  {el_str:>5}{flag}")
     return r["session"]
+
+# ─── intervals.icu download ───────────────────────────────────────────────────
+
+INTERVALS_URL  = "https://intervals.icu/api/v1"
+INTERVALS_KEY_FILE = "intervals_api_key.txt"
+RUN_TYPES      = ("Run", "TrailRun", "VirtualRun")
+
+
+def read_api_key(data_dir=None):
+    """API key from $INTERVALS_API_KEY, else intervals_api_key.txt next to this program or in the
+    data folder. The file is gitignored and excluded from the Drive mirror; never print the key."""
+    key = os.environ.get("INTERVALS_API_KEY", "").strip()
+    if key:
+        return key
+    here = os.path.dirname(os.path.abspath(__file__))
+    for folder in (here, data_dir):
+        path = os.path.join(folder, INTERVALS_KEY_FILE) if folder else None
+        if path and os.path.exists(path):
+            with open(path, encoding="utf-8-sig") as f:
+                return f.read().strip()
+    return None
+
+
+def intervals_get(path, key):
+    """GET on the intervals.icu API (HTTP basic auth, user `API_KEY`). A User-Agent is required:
+    Cloudflare rejects the default Python one with 403 (error 1010)."""
+    token = base64.b64encode(f"API_KEY:{key}".encode()).decode()
+    req = urllib.request.Request(INTERVALS_URL + path, headers={
+        "Authorization": "Basic " + token, "User-Agent": "running-coach/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read()
+
+
+def run_filename(start_local):
+    """'2026-10-12T08:28:32' -> '2026.10.12 08.28-RUNNING.csv' (the naming the rest of the program expects)."""
+    d = datetime.strptime(start_local[:16], "%Y-%m-%dT%H:%M")
+    return d.strftime("%Y.%m.%d %H.%M") + "-RUNNING.csv"
+
+
+def download_new_runs(data_dir, since=None, key=None):
+    """Fetch from intervals.icu the per-second streams of the runs not yet in `data_dir`.
+    `since` (YYYY-MM-DD) defaults to 30 days before the newest CSV there (90 days ago if none).
+    Returns {downloaded [names], skipped (already there), errors [(what, message)]}; raises
+    ValueError if there is no key or the listing fails."""
+    key = key or read_api_key(data_dir)
+    if not key:
+        raise ValueError(f"No API key: set INTERVALS_API_KEY or put it in {INTERVALS_KEY_FILE}.")
+    if since is None:
+        newest = max((filename_start(f) for f in find_run_files(data_dir)), default=None)
+        since = (newest - timedelta(days=30) if newest else datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+    athlete = os.environ.get("INTERVALS_ATHLETE_ID", "0")   # 0 = the athlete the key belongs to
+    try:
+        acts = json.loads(intervals_get(
+            f"/athlete/{athlete}/activities?oldest={since}&newest={datetime.now():%Y-%m-%d}", key))
+    except Exception as e:
+        raise ValueError(f"intervals.icu request failed: {getattr(e, 'code', '')} {e}".strip())
+    out = {"downloaded": [], "skipped": 0, "errors": []}
+    for a in sorted((a for a in acts if a.get("type") in RUN_TYPES), key=lambda a: a["start_date_local"]):
+        name = run_filename(a["start_date_local"])
+        dest = os.path.join(data_dir, name)
+        if os.path.exists(dest):
+            out["skipped"] += 1
+            continue
+        try:
+            raw = intervals_get(f"/activity/{a['id']}/streams.csv", key)
+        except Exception as e:
+            out["errors"].append((name, str(e)))
+            continue
+        if raw.count(b"\n") < 5:
+            out["errors"].append((name, "no stream data"))
+            continue
+        with open(dest, "wb") as f:   # keep the bytes as served (identical to the manual export)
+            f.write(raw)
+        out["downloaded"].append(name)
+    return out
 
 # ─── File discovery ───────────────────────────────────────────────────────────
 
@@ -781,6 +836,24 @@ def main():
     hist_file = history_path(data_dir)
     reprocess_all = "--all" in args
     args = [a for a in args if a != "--all"]
+    since = None
+    if "--since" in args:
+        i = args.index("--since")
+        if i + 1 >= len(args):
+            sys.exit("--since needs a date (YYYY-MM-DD)")
+        since = args[i + 1]
+        del args[i:i + 2]
+    if "--download" in args or since:
+        args = [a for a in args if a != "--download"]
+        try:
+            res = download_new_runs(data_dir, since)
+        except ValueError as e:
+            sys.exit(str(e))
+        print(f"intervals.icu: {len(res['downloaded'])} runs downloaded, {res['skipped']} already present.")
+        for n in res["downloaded"]:
+            print(f"  + {n}")
+        for n, m in res["errors"]:
+            print(f"  ! {n}: {m}")
     history = load_history(hist_file)
     if args:
         files = args
@@ -795,7 +868,7 @@ def main():
         return
     if not files:
         print("No RUNNING file found.")
-        print("Usage: python parse_run_csv.py [--data CARTELLA] [--no-weather] [--all] [file.csv ...]")
+        print("Usage: python parse_run_csv.py [--data CARTELLA] [--no-weather] [--all] [--download] [--since YYYY-MM-DD] [file.csv ...]")
         sys.exit(1)
 
     sessions = [s for s in (analyze(fp) for fp in files) if s]
@@ -809,15 +882,11 @@ def main():
 
     last = sessions[-1]
     latest = is_latest(history, last)
-    if latest:
-        legs = get_leg_condition()
-        last["legs"] = legs
-
     save_history(history, hist_file)
     print(f"\n  ✓ History updated: {hist_file} ({len(history)} sessions)")
 
     if latest:
-        recommendations(history, last, legs)
+        recommendations(history, last)
     else:
         newest = history[-1]
         print(f"\n  No recommendation: the latest session in the history is {newest['date']} {newest['time']}.")
