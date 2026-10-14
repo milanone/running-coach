@@ -156,6 +156,61 @@ class RunMetricsTests(unittest.TestCase):
         label, _ = R.training_status(R.training_load(spike, today=d0 + timedelta(weeks=5, days=5)))
         self.assertEqual(label, "Overreaching")                            # ratio ~3.3, past the 2.0 of Garmin's "very high"
 
+    def test_gauges_pick_the_band_of_each_value(self):
+        load = {"acute": 150.0, "chronic": 100.0, "tsb": -12.0}
+        summ = {"load": load, "status": ("Productive", ""), "athlete": ATHLETE}
+        m = {"te": 3.4, "perf_pct": -7.0, "hrr60": 9.0}
+        session = {"drift_pct": "2.5", "avg_hr_bpm": "133"}                        # 133 / 190 = 70%: the edge of zone 3
+        g = {x["key"]: x for x in R.gauges(m, session, summ)}
+        self.assertEqual(len(g), 8)
+        self.assertEqual((g["load_ratio"]["label"], g["load_ratio"]["tone"]), ("High", "warn"))      # 1.5: in Garmin's 1.4-2.0
+        self.assertNotIn("small", g["load_ratio"]["advice"])                                 # a heavy base: no low-base remark
+        self.assertEqual(g["form"]["label"], "Building")
+        self.assertEqual(g["drift"]["label"], "Steady")
+        self.assertEqual(g["intensity"]["label"], "Zone 3")
+        self.assertEqual(g["te"]["label"], "Improving")
+        self.assertEqual(g["condition"]["label"], "Below usual")
+        self.assertEqual((g["hrr"]["label"], g["hrr"]["tone"]), ("Slow", "bad"))
+        for x in g.values():                                                             # every gauge says where its range comes from
+            self.assertIn(x["level"], ("sourced", "secondary", "mine"))
+            self.assertTrue(x["why"] and x["source"])
+            self.assertLessEqual(x["lo"], x["bands"][0][0])
+            self.assertGreaterEqual(x["hi"], x["bands"][-1][1])
+        # a small weekly base: a high ratio carries the remark
+        small = dict(summ, load={"acute": 60.0, "chronic": 30.0, "tsb": -3.0})
+        self.assertIn("small", {x["key"]: x for x in R.gauges(m, session, small)}["load_ratio"]["advice"])
+        # no data at all: every gauge says so instead of failing
+        empty = R.gauges(None, None, None)
+        self.assertEqual({x["label"] for x in empty}, {"No data"})
+        self.assertTrue(all(x["value"] is None for x in empty))
+        # a value past the end of the scale falls in the last band
+        far = R.gauges({"te": 5.0}, {"drift_pct": "40"}, summ)
+        self.assertEqual({x["key"]: x["label"] for x in far}["drift"], "High")
+        self.assertEqual({x["key"]: x["label"] for x in far}["te"], "Highly improving")
+
+    def test_vo2max_gauge_uses_the_norms_of_age_and_sex(self):
+        self.assertEqual(R.vo2max_norm(55, "M"), (35.6, 39.2, 43.4, 48.9))                 # the Cooper Institute table, men 50-59
+        self.assertEqual(R.vo2max_norm(55, "F"), (30.1, 33.0, 36.7, 41.1))
+        self.assertEqual(R.vo2max_norm(20, "M")[0], 41.7)
+        self.assertEqual(R.vo2max_norm(79, "F")[3], 36.7)
+        self.assertIsNone(R.vo2max_norm(19, "M"))                                          # outside the table
+        self.assertIsNone(R.vo2max_norm(80, "M"))
+        self.assertIsNone(R.vo2max_norm(55, None))
+        self.assertIsNone(R.vo2max_norm(None, "M"))
+        summ = {"load": None, "vo2max": 41.0, "vo2max_range": (38.0, 44.0), "status": ("", ""), "athlete": dict(ATHLETE, age=55, sex="M")}
+        g = {x["key"]: x for x in R.gauges({}, {}, summ)}["vo2max"]
+        self.assertEqual((g["label"], g["tone"]), ("Good", "good"))                          # 39.2 <= 41 < 43.4
+        self.assertIn("38-44", g["advice"])                                                 # the spread of the last runs is said
+        self.assertEqual((g["lo"], g["hi"]), (20, 57))                                      # 48.9 + 8
+        self.assertEqual([b[3] for b in g["bands"]], ["Poor", "Fair", "Good", "Excellent", "Superior"])
+        female = dict(summ, athlete=dict(ATHLETE, age=55, sex="F"))
+        self.assertEqual({x["key"]: x for x in R.gauges({}, {}, female)}["vo2max"]["label"], "Excellent")   # 41.0 is just under the 41.1 of Superior for women 50-59
+        # without age or sex the gauge asks for them and still shows the value
+        bare = {x["key"]: x for x in R.gauges({}, {}, dict(summ, athlete=ATHLETE))}["vo2max"]
+        self.assertIsNone(bare["value"])
+        self.assertIn("age", bare["advice"])
+        self.assertEqual(bare["text"], "41.0")
+
     def test_next_session_advice(self):
         def run(day, tss, pace="6:30"):
             return {"date": day, "time": "07:00", "dist_km": "5.0", "pace_minkm": pace, "tss": str(tss), "drift_pct": "1.0", "ef_m_beat": "1.0"}
@@ -183,6 +238,22 @@ class RunMetricsTests(unittest.TestCase):
         self.assertFalse(adv["easy_pace"])                                             # no pace-at-HR data: the core's pace
         self.assertIsNone(R.next_session([], [], None))
         self.assertIn("no session", R.next_session_lines(None)[0])
+
+    def test_athlete_age_sex_and_writing(self):
+        with tempfile.TemporaryDirectory() as d:
+            R.write_athlete(d, {"hr_max": 185, "age": 40, "sex": "F", "hr_max_estimated": True})
+            a = R.read_athlete(d)
+            self.assertEqual((a["hr_max"], a["age"], a["sex"], a["hr_max_estimated"]), (185, 40, "F", True))
+            R.write_athlete(d, {"age": 41, "hr_max_estimated": None})                      # None removes a key; the others are kept
+            a = R.read_athlete(d)
+            self.assertEqual((a["hr_max"], a["age"], a["sex"], a["hr_max_estimated"]), (185, 41, "F", None))
+            with open(os.path.join(d, R.ATHLETE_FILE), "w") as f:
+                json.dump({"age": "old", "sex": "x", "hr_max": 180, "colour": "red"}, f)
+            a = R.read_athlete(d)
+            self.assertEqual((a["age"], a["sex"], a["hr_max"]), (None, None, 180))         # a bad age or sex is ignored, not fatal
+            R.write_athlete(d, {"sex": "m"})
+            self.assertEqual(R.read_athlete(d)["sex"], "M")
+            self.assertEqual(json.load(open(os.path.join(d, R.ATHLETE_FILE)))["colour"], "red")   # an unknown key survives a rewrite
 
     def test_athlete_file_and_formatting(self):
         with tempfile.TemporaryDirectory() as d:

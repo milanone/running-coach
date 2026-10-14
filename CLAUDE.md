@@ -37,7 +37,7 @@ folder shown in the first one is a placeholder typed into the entry after loadin
   `analyze_file` / `import_sessions` used by the GUI. Personal parameters are constants at the top (`THRESHOLD_HR`,
   `EF_BASELINE`, the `DRIFT_*` thresholds...).
 - `run_metrics.py`: the advanced metrics, see the section below.
-- `running-coach-gui.pyw`: class `App` (Tkinter): History tab (sortable table, per-km detail), Charts tab
+- `running-coach-gui.pyw`: class `App` (Tkinter): History tab (sortable table, per-km detail), Gauges tab (see below), Charts tab
   (hand-drawn on a `tk.Canvas`, with a 3-session moving average), no Next session tab (the advice for the next run is the top block of the Fitness tab: `run_metrics.next_session`, the core's `compute_recommendations` refined with the load ratio and the pace at a fixed heart rate). The import runs in a thread and
   reports through a queue polled by `_poll`; `import_now()` is the synchronous version used by the tests.
   The data folder is remembered in `~/.running_coach_gui.json`.
@@ -90,6 +90,21 @@ What each estimate rests on, and how far it is checked (nothing here is validate
 - On Francesco's 35 runs the per-run VO2max estimate scatters between about 40 and 49 (+-10%), the median of five gives ~45; use the trend.
   The acute/chronic ratio with exponential averages (CTL/ATL) swung between 0.4 and 1.5 for a once-a-week runner, so the ratio uses the 7-day
   and 28-day sums instead.
+
+## Gauges tab
+
+`run_metrics.gauges(m, session, summ)` (pure, tested without Tk) returns one dict per value with a reference range: load ratio and form
+(as of today, from `summ["load"]`), drift and average heart rate as % of the maximum (from the history row), training effect, performance
+condition and heart-rate recovery (from the run's metrics) and the VO2max (`vo2_gauge`: the median of the last five runs against the Cooper Institute's percentiles by decade of age and sex, `VO2MAX_NORMS`: Garmin manuals, two read and identical, the unit is not printed there; 20-79 only; the estimate's own spread is said in the card). Each has its `bands` (from, to, tone, label, advice), the scale `lo`..`hi`, the
+verdict of the band the value falls in, `why` and `source`, and `level`: `sourced` (a source was read: Garmin manual load-ratio table,
+Firstbeat training-effect bands, Cole 1999 for the 12 bpm limit), `secondary` (drift 5/10% from TrainingPeaks articles, form from Friel's
+race-day +15 to +25 plus a third-party table, VO2max from the reprinted Cooper tables: the primary texts were not read) or `mine` (the zones as % of the maximum, the performance
+condition bands). Do not add a gauge without a range you can name a source for, and keep `level` honest: that is what the card shows. The VO2max needs `age`
+and `sex` in `athlete.json` (entered with the *Athlete...* button, `edit_athlete` / `apply_athlete`, validated, saved by `run_metrics.write_athlete`, which
+keeps keys it does not know); they are left out of the metrics cache key because they only place the VO2max. The GUI (`_build_gauges_tab`, `draw_gauges`,
+`_draw_gauge`) draws each dial on a `tk.Canvas` with `create_arc(style="arc")`, bands as arcs and a needle; `fit_summ` is `gauge_summ`,
+set by `apply_fitness`, so the tab is filled by the same lazy thread as the Fitness tab (`ensure_fitness` also starts it when Gauges is
+selected). The README screenshot is synthetic with the placeholder data path.
 
 ## Clipped heart rate (found 2026-10-14)
 

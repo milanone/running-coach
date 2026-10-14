@@ -363,6 +363,56 @@ class GuiSmokeTests(unittest.TestCase):
                 app._close()
 
 
+    def test_gauges_tab_draws_a_card_per_value_and_follows_the_run(self):
+        gui = load_gui()
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("2026.04.14 07.00", "2026.04.21 07.00", "2026.04.28 07.00"):
+                write_run(os.path.join(d, f"{name}-RUNNING.csv"), km=4.0, base_speed=2.6, icu_format=True)
+            app = gui.App(data_dir=d, config_path=os.path.join(d, "cfg.json"))
+            try:
+                app.fetch.set(False)
+                app.import_now()
+                app.fitness_now()
+                app.update()
+                self.assertEqual(len(app.gauge_cards), 8)
+                self.assertEqual(app.gauge_run.get().split()[0], "2026-04-28")          # the newest run first
+                self.assertTrue(all(g["title"] for _, g in app.gauge_cards))
+                app.gauge_run.set(app.gauge_box.cget("values")[-1])                    # an older run
+                app.draw_gauges()
+                self.assertTrue(app.gauge_run.get().startswith("2026-04-14"))
+                self.assertEqual(len(app.gauge_cards), 8)
+                app.history = []                                                       # nothing to show: a message, no cards
+                app.apply_fitness(app.fit_id, [], None)
+                self.assertEqual(app.gauge_cards, [])
+            finally:
+                app._close()
+
+    def test_athlete_dialog_values_are_checked_and_saved(self):
+        gui = load_gui()
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("2026.04.14 07.00", "2026.04.21 07.00", "2026.04.28 07.00"):
+                write_run(os.path.join(d, f"{name}-RUNNING.csv"), km=4.0, base_speed=2.6, icu_format=True)
+            app = gui.App(data_dir=d, config_path=os.path.join(d, "cfg.json"))
+            ok = {"hr_max": "185", "hr_rest": "55", "mass_kg": "70,5", "age": "40"}
+            try:
+                app.fetch.set(False)
+                app.import_now()
+                values = app.apply_athlete(ok, "F", False)
+                self.assertEqual((values["mass_kg"], values["age"], values["sex"], values["hr_max_estimated"]), (70.5, 40, "F", None))
+                saved = gui.rm.read_athlete(d)
+                self.assertEqual((saved["hr_max"], saved["hr_rest"], saved["age"], saved["sex"]), (185, 55, 40, "F"))
+                for bad in (dict(ok, hr_max="abc"), dict(ok, hr_max="300"), dict(ok, age="5"), dict(ok, mass_kg="")):
+                    with self.assertRaises(ValueError):
+                        app.apply_athlete(bad, "F", False)
+                with self.assertRaises(ValueError):
+                    app.apply_athlete(ok, "X", False)
+                self.assertEqual(gui.rm.read_athlete(d)["age"], 40)                       # nothing was saved by the failed attempts
+                app.apply_athlete(dict(ok, age=""), "", True)                              # age and sex are optional
+                saved = gui.rm.read_athlete(d)
+                self.assertEqual((saved["age"], saved["sex"], saved["hr_max_estimated"]), (None, None, True))
+            finally:
+                app._close()
+
     def test_health_sync_folder_is_remembered_and_checked(self):
         gui = load_gui()
         with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as fit:

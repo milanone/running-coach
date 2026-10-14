@@ -26,6 +26,8 @@ DEFAULT_ATHLETE = {
     "cadence_factor": None,              # 1 or 2: the CSV cadence is per foot when ~88 (x2 = steps/min); None = decide from the data
     "hr_ref": None,                      # heart rate used for "pace at a fixed heart rate"; None = 60% of the heart-rate reserve
     "hr_max_estimated": None,            # True when hr_max is a formula or a guess, not measured: the VO2max is then also given for hr_max +- 15
+    "age": None,                         # years: with the sex, places the VO2max against the Cooper Institute's norms (Gauges tab)
+    "sex": None,                         # "M" or "F"
 }
 CLIP_SECONDS = 30                        # a heart rate at the run's maximum for this long is a clipped recording, not a heart rate
 HRMAX_MARGIN = 15                        # bpm: Firstbeat reports about 7-9% of VO2max error for a maximum heart rate off by this much
@@ -50,7 +52,34 @@ def read_athlete(data_dir):
             athlete.update({k: v for k, v in json.load(f).items() if k in athlete})
     except (OSError, ValueError, TypeError, AttributeError):
         pass
+    sex = str(athlete["sex"]).strip().upper()[:1] if athlete["sex"] else None
+    athlete["sex"] = sex if sex in ("M", "F") else None
+    age = athlete["age"]
+    athlete["age"] = age if isinstance(age, (int, float)) and not isinstance(age, bool) and 10 <= age <= 110 else None
     return athlete
+
+
+def write_athlete(data_dir, values):
+    """Save parameters into `athlete.json`, keeping the keys it already has (and any that this program does not know). A value of None
+    removes its key. Returns the path."""
+    path = os.path.join(data_dir, ATHLETE_FILE)
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            current = json.load(f)
+        if not isinstance(current, dict):
+            current = {}
+    except (OSError, ValueError):
+        current = {}
+    for k, v in values.items():
+        if v is None:
+            current.pop(k, None)
+        else:
+            current[k] = v
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(current, f, indent=2)
+    os.replace(tmp, path)
+    return path
 
 
 def fmt_time(seconds):
@@ -526,7 +555,8 @@ def compute_all(data_dir, history, athlete, progress=None):
         if not path:
             continue
         fit = core.fit_path(path)                                       # the heart rate comes from the FIT when there is one
-        stamp = [os.path.getmtime(path), merge_stamp, athlete, speed_ref and round(speed_ref, 3), fit and os.path.getmtime(fit)]
+        per_run = {k: v for k, v in athlete.items() if k not in ("age", "sex")}               # these two only place the VO2max in the gauges
+        stamp = [os.path.getmtime(path), merge_stamp, per_run, speed_ref and round(speed_ref, 3), fit and os.path.getmtime(fit)]
         name = os.path.basename(path)
         hit = entries.get(name)
         if hit and hit.get("stamp") == json.loads(json.dumps(stamp)):
@@ -648,6 +678,165 @@ def next_session_lines(adv):
            f"Pace: {core.format_pace(adv['pace_s'])}/km{ef}"]
     out += [f"{i}  {t}" for i, t in adv["notes"]]
     return out
+
+
+# ─── Gauges: values with a reference range ──────────────────────────────────
+
+# VO2max by age decade and sex, the Cooper Institute's percentiles as the Garmin manuals reprint them ("VO2 Max. Standard Ratings",
+# reprinted with permission from The Cooper Institute; two manuals read and identical): the lower limits of Fair (40th percentile), Good (60th),
+# Excellent (80th) and Superior (95th). Below the first value is Poor. The manuals do not state the unit; it is ml/kg/min.
+VO2MAX_NORMS = {
+    "M": {20: (41.7, 45.4, 51.1, 55.4), 30: (40.5, 44.0, 48.3, 54.0), 40: (38.5, 42.4, 46.4, 52.5),
+          50: (35.6, 39.2, 43.4, 48.9), 60: (32.3, 35.5, 39.5, 45.7), 70: (29.4, 32.3, 36.7, 42.1)},
+    "F": {20: (36.1, 39.5, 43.9, 49.6), 30: (34.4, 37.8, 42.4, 47.4), 40: (33.0, 36.3, 39.7, 45.3),
+          50: (30.1, 33.0, 36.7, 41.1), 60: (27.5, 30.0, 33.0, 37.8), 70: (25.9, 28.1, 30.9, 36.7)},
+}
+
+
+def vo2max_norm(age, sex):
+    """(fair, good, excellent, superior) lower limits for this age and sex, or None outside 20-79 or without a sex."""
+    if age is None or sex not in VO2MAX_NORMS or not 20 <= age < 80:
+        return None
+    return VO2MAX_NORMS[sex][int(age) // 10 * 10]
+
+
+# A band is (from, to, tone, label, advice). The tones are good / ok / warn / bad / info; the GUI turns them into colours.
+LOAD_RATIO_BANDS = [
+    (0.0, 0.8, "info", "Low", "You are running less than your usual: fine for a recovery week, detraining if it lasts."),
+    (0.8, 1.4, "good", "Optimal", "The last week is in line with your last month: the load builds at a pace the body is used to."),
+    (1.4, 2.0, "warn", "High", "You ramped up faster than usual: keep the next runs easy and add rest."),
+    (2.0, 3.0, "bad", "Very high", "A big jump over your usual load: the time when overuse injuries show up. Rest, then restart gently."),
+]
+FORM_BANDS = [
+    (-40, -30, "bad", "Heavy fatigue", "Much more load than you are adapted to: risk of overreaching. Ease off."),
+    (-30, -10, "good", "Building", "Tired from training, as expected in a block that builds fitness."),
+    (-10, 10, "ok", "Neutral", "Neither tired nor fresh: the usual state of regular training."),
+    (10, 25, "good", "Fresh", "Rested after a lighter spell: the range aimed at on race day."),
+    (25, 40, "warn", "Too rested", "Well below your usual training for a while: fitness is slipping."),
+]
+DRIFT_BANDS = [
+    (-5, 5, "good", "Steady", "The heart rate stayed level at a steady pace: good aerobic endurance for this duration and effort."),
+    (5, 10, "ok", "Moderate", "The heart rate rose along the run: heat, dehydration, fatigue or a pace a bit high for the day."),
+    (10, 15, "bad", "High", "A strong rise: the effort was above your aerobic limit that day, or you were tired or too hot."),
+]
+TE_BANDS = [
+    (0.0, 1.0, "info", "No effect", "Too short or too easy to train anything: a recovery run."),
+    (1.0, 2.0, "ok", "Minor", "A light stimulus: helps recovery, does not build much."),
+    (2.0, 3.0, "good", "Maintaining", "Keeps your fitness where it is."),
+    (3.0, 4.0, "good", "Improving", "A solid stimulus: this kind of run raises your fitness."),
+    (4.0, 5.0, "good", "Highly improving", "A hard session: needs a proper recovery before the next."),
+]
+HRR_BANDS = [
+    (0, 12, "bad", "Slow", "In Cole's 1999 study of patients a drop of 12 bpm or less in the first minute after exercise was linked to a higher risk of death."),
+    (12, 60, "good", "Not abnormal", "The heart rate fell faster than that threshold. A faster fall generally goes with better fitness."),
+]
+INTENSITY_BANDS = [
+    (40, 50, "info", "Very light", "Below zone 1: walking or a very easy jog."),
+    (50, 60, "ok", "Zone 1", "Warm-up or recovery effort."),
+    (60, 70, "good", "Zone 2", "Easy aerobic running: where most of your runs should be."),
+    (70, 80, "ok", "Zone 3", "Moderate: a steady effort, harder than an easy run."),
+    (80, 90, "warn", "Zone 4", "Hard: near the threshold. Fine now and then, not for every run."),
+    (90, 100, "bad", "Zone 5", "Maximal effort."),
+]
+CONDITION_BANDS = [
+    (-20, -10, "bad", "Much below usual", "Much less efficient than in your last runs: tired, ill, or very hot."),
+    (-10, -5, "warn", "Below usual", "Less efficient than usual: heat, poor sleep or fatigue are the usual reasons."),
+    (-5, 5, "good", "Usual", "As efficient as in your last runs."),
+    (5, 20, "good", "Better than usual", "More efficient than in your last runs: fresh, or the fitness is rising."),
+]
+
+
+def _gauge(key, title, value, text, lo, hi, bands, why, source, level, extra=""):
+    """One gauge: the value on the scale lo..hi, the band it falls in, and what to make of it. `level` says how far the reference
+    range can be trusted: 'sourced', 'secondary' (the source was not read in full) or 'mine' (a rule of thumb of this program)."""
+    band = None
+    if value is not None:
+        band = next((b for b in bands if b[0] <= value < b[1]), bands[-1] if value >= bands[-1][1] else bands[0])
+    return {"key": key, "title": title, "value": value, "text": text, "lo": lo, "hi": hi, "bands": bands,
+            "tone": band[2] if band else "none", "label": band[3] if band else "No data",
+            "advice": (band[4] + (" " + extra if extra else "")) if band else extra, "why": why, "source": source, "level": level}
+
+
+def vo2_gauge(summ, athlete):
+    """The VO2max against the Cooper Institute's norms for the athlete's age and sex (athlete.json: `age`, `sex`)."""
+    vo2 = (summ or {}).get("vo2max")
+    rng = (summ or {}).get("vo2max_range")
+    norm = vo2max_norm(athlete.get("age"), athlete.get("sex"))
+    why = ("The VO2max estimated from your heart rate and speed (median of the last five runs), against the VO2max of people of your age and "
+           "sex. It is an estimate that is off by 5-10% or more, and your runs are slower than the equation was made for, so read it as a "
+           "trend and a rough position, not as a lab result.")
+    source = ("Cooper Institute percentiles, as reprinted in the Garmin manuals ('VO2 Max. Standard Ratings', two manuals read, identical); "
+              "the original tables were not read.")
+    if norm is None:
+        why_not = ("Needs your age (20-79) and sex: set them with the Athlete button at the top." if vo2 else "")
+        flat = [(20, 60, "info", "", "")]
+        return _gauge("vo2max", "VO2max (estimate)", None, f"{vo2:.1f}" if vo2 else "-", 20, 60, flat, why, source, "secondary",
+                      why_not or "Not enough steady running yet to estimate it.")
+    fair, good, excellent, superior = norm
+    hi = round(superior + 8)
+    bands = [
+        (20, fair, "bad", "Poor", "Below the 40th percentile of people of your age and sex."),
+        (fair, good, "warn", "Fair", "Between the 40th and the 60th percentile of people of your age and sex."),
+        (good, excellent, "good", "Good", "Between the 60th and the 80th percentile: better than most of your age group."),
+        (excellent, superior, "great", "Excellent", "Between the 80th and the 95th percentile."),
+        (superior, hi, "great", "Superior", "Above the 95th percentile."),
+    ]
+    extra = ""
+    if vo2 and rng:
+        extra = (f"Your last runs gave {rng[0]:.0f}-{rng[1]:.0f}; with an error of that size the true band could be one step either side.")
+    return _gauge("vo2max", "VO2max (estimate)", vo2, f"{vo2:.1f}" if vo2 else "-", 20, hi, bands, why, source, "secondary", extra)
+
+
+def gauges(m, session, summ):
+    """The values that have a reference range, as gauge descriptions for the GUI. `m` is the run's metrics (compute_all's row), `session`
+    its history row, `summ` summary()'s result (the load and the athlete). Any of them can be None: the gauge then says there is no data."""
+    m, session = m or {}, session or {}
+    athlete = (summ or {}).get("athlete") or DEFAULT_ATHLETE
+    load = (summ or {}).get("load")
+    ready = bool(load and load["chronic"] > 0 and summ["status"][0] != "Not enough history")
+    ratio = load["acute"] / load["chronic"] if ready else None
+    low_base = ""
+    if ratio is not None and ratio > 1.4 and load["acute"] < LOW_WEEKLY_TSS:
+        low_base = f"With only {load['acute']:.0f} TSS in 7 days the base is small, so this is a ramp-up from little, not a spike."
+    drift = core.safe_float(session.get("drift_pct"))
+    avg_hr = core.safe_float(session.get("avg_hr_bpm"))
+    pct = avg_hr / athlete["hr_max"] * 100 if avg_hr else None
+    return [
+        _gauge("load_ratio", "Load ratio (now)", ratio, f"{ratio:.2f}" if ratio is not None else "-", 0.0, 3.0, LOAD_RATIO_BANDS,
+               "The training load of the last 7 days divided by the weekly average of the last 28 days. It says whether you are asking the body "
+               "for more than it is used to. Needs about four weeks of history. Shown for today, not for the run chosen above.",
+               "Garmin manual, Training Status (load ratio table); the bands are joined at 1.4 and 2.0.", "sourced", low_base),
+        _gauge("form", "Form, TSB (now)", load["tsb"] if load else None, f"{load['tsb']:+.0f}" if load else "-", -40, 40, FORM_BANDS,
+               "Fitness (the 42-day average of the load) minus fatigue (the 7-day average). Negative means more tired than trained for, "
+               "positive means rested. It is not a performance predictor. Shown for today.",
+               "Friel, TrainingPeaks blog 'Applying the numbers, part 3' (race day +15 to +25) and a third-party table for the other bands.",
+               "secondary"),
+        _gauge("drift", "Heart-rate drift", drift, f"{drift:+.1f} %" if drift is not None else "-", -5, 15, DRIFT_BANDS,
+               "How much the heart rate rose from the first to the second half of the run (warm-up and final sprint left out). At a steady pace "
+               "it is the same as aerobic decoupling; if you sped up or slowed down it also mixes in the pace.",
+               "TrainingPeaks, 'Aerobic endurance and decoupling': under 5% strong, 5-10% moderate, over 10% limited. The advice of this "
+               "program uses its own 6% and 8% thresholds.", "secondary"),
+        _gauge("intensity", "Average heart rate (% of max)", pct, f"{pct:.0f} %" if pct is not None else "-", 40, 100, INTENSITY_BANDS,
+               "The average heart rate of the run as a percentage of your maximum, in the program's zones (Garmin's default percentages). "
+               "It tells how hard the run was on average, not whether it was good.",
+               "Zone percentages: Garmin's defaults, as the program uses them (from memory, not re-read).", "mine"),
+        _gauge("te", "Training effect (indicative)", m.get("te"), f"{m['te']:.1f}" if m.get("te") is not None else "-", 0.0, 5.0, TE_BANDS,
+               "How much the run trains the aerobic system, from 0 to 5, computed from the time in the heart-rate zones. The 0-5 reading is "
+               "Firstbeat's; this value is NOT their calculation and is not calibrated against a watch.",
+               "Firstbeat white paper 'EPOC based training effect assessment' (the bands); the value is the program's own.", "sourced"),
+        vo2_gauge(summ, athlete),
+        _gauge("condition", "Performance condition", m.get("perf_pct"), f"{m['perf_pct']:+.1f} %" if m.get("perf_pct") is not None else "-", -20, 20,
+               CONDITION_BANDS,
+               "The efficiency (speed per heartbeat) of minutes 6-20 of the run against the median of your previous ten runs. Heat, sleep, "
+               "hills and caffeine all move it.",
+               "A scale of this program, shaped like Garmin's -20 to +20; the bands at +-5 and +-10 are rules of thumb.", "mine"),
+        _gauge("hrr", "Heart-rate recovery, 60 s", m.get("hrr60"), f"{m['hrr60']:.0f} bpm" if m.get("hrr60") is not None else "-", 0, 60,
+               HRR_BANDS,
+               "How many beats per minute the heart rate dropped in the minute after the run ended. The study measured it right after a "
+               "maximal treadmill test, and your run usually ends at an easy effort and a few steps of walking, so read it as a trend.",
+               "Cole et al., N Engl J Med 1999;341:1351-7 (PubMed 10536127): 12 bpm or less is abnormal. Only the lower limit is a published one.",
+               "sourced"),
+    ]
 
 
 # ─── Text for the GUI ────────────────────────────────────────────────────────

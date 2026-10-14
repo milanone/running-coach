@@ -87,6 +87,12 @@ TABLE_COLUMNS = [
 ]
 
 
+GAUGE_W, GAUGE_H = 300, 168
+GAUGE_FILL = {"great": "#2e8b57", "good": "#4caf73", "ok": "#e6c04a", "warn": "#e8903a", "bad": "#d95050", "info": "#7aa7d9"}        # the bands of a gauge
+GAUGE_TEXT = {"great": "#1b6b3e", "good": "#1f7a45", "ok": "#8a6d00", "warn": "#b35f10", "bad": "#b02a2a", "info": "#3d6ea8"}        # the verdict text
+GAUGE_LEVEL = {"sourced": "from a source that was read", "secondary": "from secondary sources", "mine": "a rule of thumb of this program"}
+
+
 def load_config(path):
     try:
         with open(path, encoding="utf-8") as f:
@@ -154,6 +160,7 @@ class App(tk.Tk):
         self.btn_download.pack(side="left", padx=(6, 0))
         bar2 = ttk.Frame(self, padding=(8, 0, 8, 4))
         bar2.pack(fill="x")
+        ttk.Button(bar2, text="Athlete…", command=self.edit_athlete).pack(side="left", padx=(0, 14))
         ttk.Label(bar2, text="Health Sync folder (FIT files, optional):").pack(side="left")
         fit_entry = ttk.Entry(bar2, textvariable=self.fit_dir)
         fit_entry.pack(side="left", fill="x", expand=True, padx=6)
@@ -168,6 +175,7 @@ class App(tk.Tk):
         self._build_run_tab()
         self._build_map_tab()
         self._build_fitness_tab()
+        self._build_gauges_tab()
 
     def _build_history_tab(self):
         tab = ttk.Frame(self.tabs)
@@ -765,6 +773,165 @@ class App(tk.Tk):
         self.fit_job, self.fit_thread, self.fit_id, self.fit_cancel, self.fit_stale = None, None, 0, None, True
         self.athlete = dict(rm.DEFAULT_ATHLETE)
 
+    # ── athlete parameters ───────────────────────────────────────────────
+    def edit_athlete(self):
+        """A small window for the parameters of athlete.json (heart rates, mass, age, sex)."""
+        d = self._dir()
+        if not d:
+            messagebox.showinfo("Athlete", "Choose the data folder first: the parameters are saved in it.")
+            return
+        a = rm.read_athlete(d)
+        win = tk.Toplevel(self)
+        win.title("Athlete parameters")
+        win.transient(self)
+        win.resizable(False, False)
+        fields = [("hr_max", "Maximum heart rate (bpm)"), ("hr_rest", "Resting heart rate (bpm)"), ("mass_kg", "Mass (kg)"),
+                  ("age", "Age (years)")]
+        vars_ = {k: tk.StringVar(value="" if a[k] is None else f"{a[k]:g}") for k, _ in fields}
+        sex = tk.StringVar(value=a["sex"] or "")
+        estimated = tk.BooleanVar(value=bool(a["hr_max_estimated"]))
+        frame = ttk.Frame(win, padding=14)
+        frame.pack()
+        for i, (k, label) in enumerate(fields):
+            ttk.Label(frame, text=label).grid(row=i, column=0, sticky="w", pady=3)
+            ttk.Entry(frame, textvariable=vars_[k], width=10).grid(row=i, column=1, padx=(10, 0), pady=3)
+        ttk.Label(frame, text="Sex").grid(row=len(fields), column=0, sticky="w", pady=3)
+        ttk.Combobox(frame, textvariable=sex, values=["M", "F"], state="readonly", width=8).grid(row=len(fields), column=1, padx=(10, 0))
+        ttk.Checkbutton(frame, text="The maximum heart rate is an estimate, not measured", variable=estimated).grid(
+            row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(frame, text="Saved in athlete.json in the data folder (private: not in the repository).\nAge and sex place the VO2max "
+                  "against norms; the age does not update itself.", foreground="#555").grid(row=len(fields) + 2, column=0, columnspan=2,
+                                                                                         sticky="w", pady=(8, 0))
+
+        def save():
+            try:
+                values = self.apply_athlete({k: v.get() for k, v in vars_.items()}, sex.get(), estimated.get())
+            except ValueError as e:
+                messagebox.showerror("Athlete", str(e), parent=win)
+                return
+            win.destroy()
+            self.status.set("Athlete parameters saved: " + ", ".join(f"{k} {v}" for k, v in values.items() if v is not None))
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=len(fields) + 3, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(buttons, text="Save", command=save).pack(side="left")
+        ttk.Button(buttons, text="Cancel", command=win.destroy).pack(side="left", padx=(6, 0))
+        win.grab_set()
+
+    def apply_athlete(self, texts, sex, hr_max_estimated):
+        """Check the texts of the dialog, save them to athlete.json and recompute. Raises ValueError with a message for the user."""
+        d = self._dir()
+        limits = {"hr_max": (100, 230, "Maximum heart rate"), "hr_rest": (25, 120, "Resting heart rate"), "mass_kg": (30, 250, "Mass"),
+                  "age": (10, 110, "Age")}
+        values = {}
+        for k, (lo, hi, name) in limits.items():
+            text = str(texts.get(k, "")).strip().replace(",", ".")
+            if not text:
+                if k == "age":
+                    values[k] = None                                  # age is optional; the others keep the defaults when empty
+                    continue
+                raise ValueError(f"{name} is needed.")
+            try:
+                v = float(text)
+            except ValueError:
+                raise ValueError(f"{name}: '{text}' is not a number.") from None
+            if not lo <= v <= hi:
+                raise ValueError(f"{name} should be between {lo} and {hi}.")
+            values[k] = int(v) if k in ("hr_max", "hr_rest", "age") else v
+        if sex not in ("", "M", "F"):
+            raise ValueError("Sex is M or F.")
+        values["sex"] = sex or None
+        values["hr_max_estimated"] = True if hr_max_estimated else None
+        rm.write_athlete(d, values)
+        self.start_fitness()
+        return values
+
+    # ── gauges ───────────────────────────────────────────────────────────
+    def _build_gauges_tab(self):
+        tab = ttk.Frame(self.tabs)
+        self.gauge_tab = tab
+        self.tabs.add(tab, text="Gauges")
+        bar = ttk.Frame(tab, padding=(10, 8, 10, 4))
+        bar.pack(fill="x")
+        ttk.Label(bar, text="Run:").pack(side="left")
+        self.gauge_run = tk.StringVar()
+        self.gauge_box = ttk.Combobox(bar, textvariable=self.gauge_run, state="readonly", width=34)
+        self.gauge_box.pack(side="left", padx=6)
+        self.gauge_box.bind("<<ComboboxSelected>>", lambda e: self.draw_gauges())
+        ttk.Label(bar, text="Coloured bands are the reference ranges; the needle is your value. The last line of each card says how far the range can be trusted.",
+                  foreground="#555").pack(side="left", padx=10)
+        body = ttk.Frame(tab)
+        body.pack(fill="both", expand=True)
+        self.gauge_canvas = tk.Canvas(body, highlightthickness=0, background=self.cget("background"))
+        sb = ttk.Scrollbar(body, orient="vertical", command=self.gauge_canvas.yview)
+        self.gauge_canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.gauge_canvas.pack(side="left", fill="both", expand=True)
+        self.gauge_inner = ttk.Frame(self.gauge_canvas)
+        self.gauge_canvas.create_window((0, 0), window=self.gauge_inner, anchor="nw", tags="inner")
+        self.gauge_inner.bind("<Configure>", lambda e: self.gauge_canvas.configure(scrollregion=self.gauge_canvas.bbox("all")))
+        self.gauge_canvas.bind("<Configure>", lambda e: self.gauge_canvas.itemconfigure("inner", width=e.width))
+        self.gauge_canvas.bind("<MouseWheel>", lambda e: self.gauge_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        self.gauge_summ = None
+
+    def draw_gauges(self):
+        """One card per value that has a reference range, for the chosen run (the load ones are as of today)."""
+        for w in self.gauge_inner.winfo_children():
+            w.destroy()
+        self.gauge_cards = []
+        rows = self.fit_rows
+        if not rows:
+            ttk.Label(self.gauge_inner, text="Import some runs to see the gauges.", padding=20).pack()
+            self.gauge_box.configure(values=[])
+            return
+        names = [f"{r['date']} {r['time']}   {r['dist_km'] or 0:.2f} km" for r in reversed(rows)]
+        self.gauge_box.configure(values=names)
+        if self.gauge_run.get() not in names:
+            self.gauge_run.set(names[0])
+        m = rows[len(rows) - 1 - names.index(self.gauge_run.get())]
+        session = next((r for r in self.history if core.session_key(r) == (m["date"], m["time"])), None)
+        for i, g in enumerate(rm.gauges(m, session, self.gauge_summ)):
+            card = ttk.LabelFrame(self.gauge_inner, text=g["title"], padding=8)
+            card.grid(row=i // 2, column=i % 2, sticky="nsew", padx=8, pady=6)
+            self.gauge_inner.columnconfigure(i % 2, weight=1, uniform="g")
+            cv = tk.Canvas(card, width=GAUGE_W, height=GAUGE_H, highlightthickness=0, background=self.cget("background"))
+            cv.pack()
+            self._draw_gauge(cv, g)
+            verdict = ttk.Label(card, text=f"{g['label']}: {g['advice']}" if g["value"] is not None else (g["advice"] or "No data for this run."),
+                                wraplength=430, justify="left", font=("TkDefaultFont", 10, "bold"))
+            verdict.pack(anchor="w", pady=(4, 2))
+            if g["value"] is not None:
+                verdict.configure(foreground=GAUGE_TEXT[g["tone"]])
+            ttk.Label(card, text=g["why"], wraplength=430, justify="left").pack(anchor="w", pady=2)
+            ttk.Label(card, text=f"Reference ({GAUGE_LEVEL[g['level']]}): {g['source']}", wraplength=430, justify="left",
+                      foreground="#666", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(2, 0))
+            self.gauge_cards.append((card, g))
+
+    def _draw_gauge(self, cv, g):
+        """A half-circle scale with the bands as coloured arcs and a needle at the value."""
+        cx, cy, r, width = GAUGE_W / 2, GAUGE_H - 34, 98, 20
+        box = (cx - r, cy - r, cx + r, cy + r)
+        span = float(g["hi"] - g["lo"])
+        frac = lambda v: (min(max(v, g["lo"]), g["hi"]) - g["lo"]) / span
+        for a, b, tone, label, _ in g["bands"]:
+            fa, fb = frac(a), frac(b)
+            cv.create_arc(*box, start=180 - 180 * fb, extent=180 * (fb - fa) + 0.5, style="arc", width=width, outline=GAUGE_FILL[tone])
+        edges = sorted({b[0] for b in g["bands"]} | {g["hi"]})
+        for v in edges:                                               # the limits between the bands, outside the arc
+            ang = math.radians(180 - 180 * frac(v))
+            x, y = cx + (r + width / 2 + 11) * math.cos(ang), cy - (r + width / 2 + 11) * math.sin(ang)
+            cv.create_text(x, y, text=f"{v:g}", fill="#666", font=("TkDefaultFont", 7))
+        if g["value"] is None:
+            cv.create_text(cx, cy - 20, text="no data", fill="#888", font=("TkDefaultFont", 12))
+            return
+        ang = math.radians(180 - 180 * frac(g["value"]))
+        tip = (cx + (r - 6) * math.cos(ang), cy - (r - 6) * math.sin(ang))
+        cv.create_line(cx, cy, *tip, width=3, fill="#222", capstyle="round")
+        cv.create_oval(cx - 6, cy - 6, cx + 6, cy + 6, fill="#222", outline="")
+        cv.create_text(cx, cy + 20, text=g["text"], font=("TkDefaultFont", 15, "bold"))
+        if g["value"] < g["lo"] or g["value"] > g["hi"]:
+            cv.create_text(cx, cy + 36, text="(off the scale)", fill="#888", font=("TkDefaultFont", 8))
+
     def _write(self, widget, text):
         widget.configure(state="normal")
         widget.delete("1.0", "end")
@@ -787,7 +954,7 @@ class App(tk.Tk):
             return
         sel = self.tabs.select()
         charts = sel == str(self.tabs.tabs()[1]) and next(m for m in METRICS if m[0] == self.metric.get())[1].startswith("adv.")
-        if sel == str(self.fit_tab) or charts:
+        if sel in (str(self.fit_tab), str(self.gauge_tab)) or charts:
             self._run_fitness()
 
     def _tab_changed(self):
@@ -849,9 +1016,11 @@ class App(tk.Tk):
     def apply_fitness(self, job, rows, summ):
         self.fit_tree.delete(*self.fit_tree.get_children())
         self._write(self.fit_detail, "")
+        self.gauge_summ = summ if isinstance(summ, dict) else None
         if rows is None:
             self.fit_rows, self.adv = [], {}
             self._write(self.fit_summary, summ)
+            self.draw_gauges()
             return
         self.fit_rows = rows
         self.adv = {(m["date"], m["time"]): m for m in rows}
@@ -866,6 +1035,7 @@ class App(tk.Tk):
         else:
             self._write(self.fit_summary, "Import some runs to see the advanced metrics.")
         self.draw_chart()
+        self.draw_gauges()
 
     def fit_show(self):
         sel = self.fit_tree.selection()
