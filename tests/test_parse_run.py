@@ -287,6 +287,59 @@ class ParseRunTests(unittest.TestCase):
                 self.assertIsNone(P.fetch_tile(16, 3, 4, d))               # offline: no tile, no exception
                 self.assertFalse(os.path.exists(os.path.join(d, "16", "3", "4.png")))
 
+    def test_heart_rate_from_the_fit_file_when_the_csv_is_clipped(self):
+        import types, unittest.mock as mock
+        from datetime import timedelta
+
+        class Msg:
+            def __init__(self, **kw):
+                self.kw = kw
+
+            def get_values(self):
+                return self.kw
+
+        def fake_fitparse(records):
+            mod = types.ModuleType("fitparse")
+            mod.FitFile = lambda path: types.SimpleNamespace(get_messages=lambda kind: [Msg(**r) for r in records])
+            return mod
+
+        name = "2026.05.07 07.51-RUNNING.csv"
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, name)
+            write_run(path, icu_format=True)
+            pts = P.extract_points(P.load_csv(path), P.filename_start(path))
+            cap = max(p["hr"] for p in pts)
+            start = P.filename_start(path)
+            clipped = lambda k: 300 <= k < 360
+            for p in pts:
+                if clipped(int(round((p["ts"] - start).total_seconds()))):
+                    p["hr"] = cap                                                # the CSV is clipped there; the FIT has the real value
+            before = [p["hr"] for p in pts]
+
+            def records(bias=0):
+                out = [{"timestamp": start}]                                      # a first record without heart rate, as Health Sync writes
+                for k in range(0, len(pts)):
+                    for half in (0, 1):                                           # two records per second, as in the real files
+                        hr = (cap + 20 if clipped(k) else before[k]) + bias
+                        out.append({"timestamp": start + timedelta(seconds=k), "heart_rate": hr + (1 if half else -1)})
+                return out
+
+            self.assertFalse(P.apply_fit_hr(pts, path))                           # no FIT_DIR: nothing changes
+            fit_dir = os.path.join(d, "fit")
+            os.mkdir(fit_dir)
+            open(os.path.join(fit_dir, name[:-4] + ".fit"), "wb").close()
+            with mock.patch.object(P, "FIT_DIR", fit_dir):
+                with mock.patch.dict(sys.modules, {"fitparse": None}):            # fitparse not installed
+                    self.assertFalse(P.apply_fit_hr(pts, path))
+                with mock.patch.dict(sys.modules, {"fitparse": fake_fitparse(records(bias=15))}):
+                    self.assertFalse(P.apply_fit_hr(pts, path))                   # off by 15 bpm everywhere: another run
+                self.assertEqual([p["hr"] for p in pts], before)
+                with mock.patch.dict(sys.modules, {"fitparse": fake_fitparse(records())}):
+                    self.assertTrue(P.apply_fit_hr(pts, path))
+            self.assertEqual(pts[330]["hr"], cap + 20)                            # the clipped seconds have the real heart rate
+            self.assertEqual(pts[100]["hr"], before[100])                         # the mean of the two records of that second
+            self.assertEqual(P.fit_path(path), None)                              # FIT_DIR is unset again outside the patch
+
     def test_ef_and_tss(self):
         self.assertAlmostEqual(P.compute_ef(5.0, 2250, 155), 5000 / (155 * 37.5), places=3)
         self.assertAlmostEqual(P.compute_tss(3600, P.THRESHOLD_HR), 100.0, places=1)

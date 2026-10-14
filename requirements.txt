@@ -1,1 +1,3 @@
 # Standard library only: nothing to install (the GUI needs Tkinter, bundled with the Windows/macOS Python).
+# Optional: read the heart rate from the original FIT files (Health Sync folder box), see the README.
+# fitparse

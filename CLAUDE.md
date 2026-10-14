@@ -85,10 +85,25 @@ What each estimate rests on, and how far it is checked (nothing here is validate
 - Francesco runs very slowly (~7.7 km/h, 128 m/min, below the ACSM running threshold of 134 and inside the jogging range): the VO2max has an extra,
   unknown bias (ACSM's 0.2 ml/kg/m is above the 3.4 J/kg/m = 0.16 ml/kg/m Minetti measured in 10 runners, so it may read high), and the VDOT race predictions
   (5 km ~22 min from a VO2max of ~47) are what a trained runner would run, far from his real pace (7:50/km): the summary says so. His maximum heart
-  rate (190) is an estimate, `hr_max_estimated` is set and the VO2max is also given for +-15 bpm (it moves by about +-8%).
+  rate was an estimate at first (`hr_max_estimated` set: the VO2max is then also given for +-15 bpm, it moves by about +-8%); the watch later
+  showed a real maximum close to it, so the athlete file now holds that value and no flag.
 - On Francesco's 35 runs the per-run VO2max estimate scatters between about 40 and 49 (+-10%), the median of five gives ~45; use the trend.
   The acute/chronic ratio with exponential averages (CTL/ATL) swung between 0.4 and 1.5 for a once-a-week runner, so the ratio uses the 7-day
   and 28-day sums instead.
+
+## Clipped heart rate (found 2026-10-14)
+
+In Francesco's CSVs from intervals.icu the heart rate of the hard runs was a flat line at one value (the same in four runs: a ceiling, never
+exceeded in 35 runs) while the watch and the Health Sync FIT/TCX/GPX had values up to ~20 bpm higher (checked per second, FIT versus CSV: the same
+values below the ceiling, the real ones above). Cause, read with his API key (`GET /athlete/0`, read-only): the `sportSettings` of `Run`
+had a `max_hr` equal to that ceiling (the `Ride` one was higher), and intervals.icu cuts a heart rate above the sport's maximum as a spike
+(forum.intervals.icu/t/max-hr-setting-and-hr-incorrectly-fixing-hr-spikes-values/679: raise the top of zone 7 / the maximum, then "Update zones or
+reprocess original file" on the activity). That setting is his account's: not changed from here (ask first). Two protections in the code:
+`parse_run_csv.apply_fit_hr` (the FIT of the same name in `FIT_DIR` replaces the CSV heart rate when it agrees with it below the clip; two records
+per second are averaged, the first FIT record is second 0 of the CSV; `fitparse` is optional and imported lazily; GUI box *Health Sync folder*,
+`~/.running_coach_gui.json` key `fit_dir`, or `$RUNNING_COACH_FIT`) and `run_metrics._clipped_plateau` (30 s or more at exactly the run's
+maximum is dropped from `series()`; a constant heart rate is not treated as clipped, so synthetic runs are unaffected). The metrics cache key
+includes the FIT file's mtime (`CACHE_VERSION` 3). Tests use a stub `fitparse` module: no real FIT file is in the repo.
 
 ## Run detail tab
 

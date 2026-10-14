@@ -122,6 +122,8 @@ class App(tk.Tk):
         self.data_dir = tk.StringVar(value=data_dir or os.environ.get("RUNNING_COACH_DATA") or cfg.get("data_dir", "")
                                      or (sibling if os.path.isdir(sibling) else ""))
         self.fetch = tk.BooleanVar(value=cfg.get("fetch_weather", True))
+        self.fit_dir = tk.StringVar(value=cfg.get("fit_dir", "") or core.FIT_DIR or "")
+        core.FIT_DIR = self.fit_dir.get().strip() or None
         self.metric = tk.StringVar(value=METRICS[0][0])
         self.status = tk.StringVar(value="")
 
@@ -150,6 +152,13 @@ class App(tk.Tk):
         self.btn_download = ttk.Button(bar, text="Download new sessions from intervals.icu",
                                        command=lambda: self.start_import(download=True))
         self.btn_download.pack(side="left", padx=(6, 0))
+        bar2 = ttk.Frame(self, padding=(8, 0, 8, 4))
+        bar2.pack(fill="x")
+        ttk.Label(bar2, text="Health Sync folder (FIT files, optional):").pack(side="left")
+        fit_entry = ttk.Entry(bar2, textvariable=self.fit_dir)
+        fit_entry.pack(side="left", fill="x", expand=True, padx=6)
+        fit_entry.bind("<Return>", lambda e: self.set_fit_dir())
+        ttk.Button(bar2, text="Browse…", command=self.browse_fit).pack(side="left")
 
     def _build_tabs(self):
         self.tabs = ttk.Notebook(self)
@@ -227,6 +236,30 @@ class App(tk.Tk):
         if d:
             self.data_dir.set(d)
             self.reload()
+
+    def browse_fit(self):
+        d = filedialog.askdirectory(title="Folder with the FIT files written by Health Sync", initialdir=self.fit_dir.get() or ".")
+        if d:
+            self.fit_dir.set(d)
+            self.set_fit_dir()
+
+    def set_fit_dir(self):
+        """The heart rate of a run comes from the FIT of the same name when this folder has it: reread everything that depends on it."""
+        d = self.fit_dir.get().strip()
+        core.FIT_DIR = d if d and os.path.isdir(d) else None
+        self._save_config()
+        self.start_fitness()
+        self.show_detail()                                    # the selected run is read again, with the new heart rate
+        if d and core.FIT_DIR is None:
+            self.status.set("The Health Sync folder does not exist.")
+        elif core.FIT_DIR:
+            try:
+                import fitparse                                  # noqa: F401
+            except ImportError:
+                self.status.set("fitparse is not installed (py -m pip install fitparse): the FIT files cannot be read.")
+                return
+            self.status.set("Heart rate from the FIT files of that folder. The History columns (HR, EF, TSS...) change with "
+                            "'Reprocess all'; the Fitness metrics and the run detail already use them.")
 
     def reload(self):
         d = self._dir()
@@ -1052,7 +1085,7 @@ class App(tk.Tk):
         messagebox.showerror("Error", f"{exc.__name__}: {val}")
 
     def _save_config(self):
-        save_config(self.config_path, {"data_dir": self.data_dir.get(), "fetch_weather": self.fetch.get()})
+        save_config(self.config_path, {"data_dir": self.data_dir.get(), "fetch_weather": self.fetch.get(), "fit_dir": self.fit_dir.get()})
 
     def _close(self):
         self._save_config()

@@ -34,6 +34,21 @@ class RunMetricsTests(unittest.TestCase):
         self.assertLess(R.aerobic_te(10000), 5.0001)
         self.assertAlmostEqual(R.recovery_hours(3.0), 36.0)
 
+    def test_clipped_heart_rate_plateau_is_left_out(self):
+        jitter = lambda k: 150 + (k % 3)
+        pts = make_pts([(600, 3.0, jitter), (120, 3.4, 167), (300, 3.0, jitter)])
+        S = R.series(pts)
+        self.assertEqual(S["clipped_s"], 120)                                  # 120 s at exactly the run's maximum
+        self.assertEqual(len([h for h in S["hr"] if h is None]), 120)
+        m = R.run_metrics(pts, ATHLETE)
+        self.assertEqual(m["hr_clipped_s"], 120)
+        self.assertTrue(any("clipped" in line for line in R.run_lines(dict(m, perf_pct=None))))
+        # a peak that moves is a real heart rate: nothing is dropped
+        moving = make_pts([(600, 3.0, jitter), (120, 3.4, lambda k: 160 + k % 4), (300, 3.0, jitter)])
+        self.assertEqual(R.series(moving)["clipped_s"], 0)
+        # a short stay at the maximum (under 30 s) is kept too
+        self.assertEqual(R.series(make_pts([(600, 3.0, jitter), (20, 3.4, 167), (300, 3.0, jitter)]))["clipped_s"], 0)
+
     def test_best_efforts_find_the_fast_stretch(self):
         S = R.series(make_pts([(600, 2.0, 130), (600, 4.0, 150), (600, 2.0, 130)]))
         best = R.best_efforts(S)
@@ -91,7 +106,7 @@ class RunMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(wkg, 3.0 * 1.04, delta=0.01)
 
     def test_heart_rate_recovery_and_rise_time(self):
-        run = [(600, 3.0, 150), (120, 0.0, lambda k: 150 - 0.4 * k)]
+        run = [(600, 3.0, lambda k: 150 - k % 2), (120, 0.0, lambda k: 150 - 0.4 * k)]      # a heart rate that moves: not a clipped plateau
         self.assertAlmostEqual(R.hr_recovery(R.series(make_pts(run))), 24.0, delta=1.0)   # 60 s later: 150 - 0.4 * 60
         self.assertIsNone(R.hr_recovery(R.series(make_pts([(600, 3.0, 150)]))))           # no data after the stop
         rise = [(900, 3.0, lambda k: 140 - 50 * math.exp(-k / 60.0))]

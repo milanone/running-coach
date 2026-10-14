@@ -363,6 +363,24 @@ class GuiSmokeTests(unittest.TestCase):
                 app._close()
 
 
+    def test_health_sync_folder_is_remembered_and_checked(self):
+        gui = load_gui()
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as fit:
+            cfg = os.path.join(d, "cfg.json")
+            app = gui.App(data_dir=d, config_path=cfg)
+            try:
+                app.fit_dir.set(fit)
+                app.set_fit_dir()
+                self.assertEqual(gui.core.FIT_DIR, fit)
+                self.assertEqual(json.load(open(cfg))["fit_dir"], fit)
+                app.fit_dir.set(os.path.join(d, "missing"))
+                app.set_fit_dir()
+                self.assertIsNone(gui.core.FIT_DIR)                        # a folder that does not exist is ignored
+                self.assertIn("does not exist", app.status.get())
+            finally:
+                gui.core.FIT_DIR = None
+                app._close()
+
     def test_fitness_tab_computes_in_a_thread_when_opened(self):
         gui = load_gui()
         with tempfile.TemporaryDirectory() as d:

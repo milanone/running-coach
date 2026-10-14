@@ -182,6 +182,69 @@ def extract_points(rows, start=None):
         })
     return sorted(pts, key=lambda p: p["ts"])
 
+
+# ─── Heart rate from the original FIT file ───────────────────────────────────
+# The intervals.icu CSV of a run can hold a heart rate clipped at a ceiling (intervals.icu cuts a heart rate above the maximum set for the sport, while the watch and the
+# FIT/TCX/GPX files written by Health Sync have the real values). When FIT_DIR points to the folder with those FIT files, the heart
+# rate of a run is read from the FIT of the same name instead of the CSV. Needs the optional fitparse package.
+
+FIT_DIR = os.environ.get("RUNNING_COACH_FIT") or None
+FIT_MAX_MISMATCH = 3.0      # bpm: the mean difference between the CSV and the FIT heart rate (where the CSV is not clipped) above which the FIT is not the same run
+
+
+def fit_path(csv_path):
+    if not FIT_DIR:
+        return None
+    path = os.path.join(FIT_DIR, os.path.splitext(os.path.basename(csv_path))[0] + ".fit")
+    return path if os.path.isfile(path) else None
+
+
+def read_fit_hr(path):
+    """{second since the first record: mean heart rate of that second} from a FIT file (two records per second are usual), or {}
+    if fitparse is not installed or the file is unreadable."""
+    try:
+        import fitparse
+    except ImportError:
+        return {}
+    try:
+        recs = [m.get_values() for m in fitparse.FitFile(path).get_messages("record")]
+    except Exception:           # fitparse raises its own error types and struct errors on a damaged file
+        return {}
+    recs = [r for r in recs if r.get("timestamp") is not None]
+    if not recs:
+        return {}
+    t0 = min(r["timestamp"] for r in recs)
+    bins = {}
+    for r in recs:
+        if r.get("heart_rate") is not None:
+            bins.setdefault(int((r["timestamp"] - t0).total_seconds()), []).append(r["heart_rate"])
+    return {k: sum(v) / len(v) for k, v in bins.items()}
+
+
+def apply_fit_hr(pts, csv_path):
+    """Replace the heart rate of the points with the FIT file's, second by second, when the FIT belongs to the same run (its heart rate
+    agrees with the CSV's where the CSV is below its own maximum, i.e. not clipped). Returns True if the FIT was used."""
+    start = filename_start(csv_path)
+    fp = fit_path(csv_path)
+    if not fp or start is None:
+        return False
+    fit = read_fit_hr(fp)
+    if not fit:
+        return False
+    top = max((p["hr"] for p in pts if p["hr"] is not None), default=None)
+    diffs = []
+    for p in pts:
+        k = int(round((p["ts"] - start).total_seconds()))
+        if p["hr"] is not None and p["hr"] < top and k in fit:
+            diffs.append(abs(p["hr"] - fit[k]))
+    if len(diffs) >= 30 and sum(diffs) / len(diffs) > FIT_MAX_MISMATCH:
+        return False
+    for p in pts:
+        k = int(round((p["ts"] - start).total_seconds()))
+        if k in fit:
+            p["hr"] = fit[k]
+    return True
+
 # ─── Distance (GPS + pre-GPS estimation) ─────────────────────────────────────
 
 def distances_from_field(pts):
@@ -549,6 +612,7 @@ def file_points(filepath):
     pts = extract_points(rows, filename_start(filepath))
     if len(pts) < 5:
         raise ValueError("Too few points.")
+    apply_fit_hr(pts, filepath)
     return compute_distances(pts)
 
 

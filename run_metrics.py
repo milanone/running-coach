@@ -18,7 +18,7 @@ import parse_run_csv as core
 
 ATHLETE_FILE = "athlete.json"
 CACHE_FILE = "run_metrics_cache.json"
-CACHE_VERSION = 2                        # bump when a formula changes: the cached per-run metrics are recomputed
+CACHE_VERSION = 3                        # bump when a formula changes: the cached per-run metrics are recomputed
 DEFAULT_ATHLETE = {
     "hr_max": 190,                       # bpm
     "hr_rest": 60,                       # bpm
@@ -27,6 +27,7 @@ DEFAULT_ATHLETE = {
     "hr_ref": None,                      # heart rate used for "pace at a fixed heart rate"; None = 60% of the heart-rate reserve
     "hr_max_estimated": None,            # True when hr_max is a formula or a guess, not measured: the VO2max is then also given for hr_max +- 15
 }
+CLIP_SECONDS = 30                        # a heart rate at the run's maximum for this long is a clipped recording, not a heart rate
 HRMAX_MARGIN = 15                        # bpm: Firstbeat reports about 7-9% of VO2max error for a maximum heart rate off by this much
 MOVING_MS = 3 / 3.6                      # below 3 km/h the athlete is counted as stopped
 ZONE_EDGES = (0.5, 0.6, 0.7, 0.8, 0.9)   # fractions of the maximum heart rate (Garmin's default zones)
@@ -77,13 +78,38 @@ def series(pts):
             sp = (d[i] - d[i - 1]) / (t[i] - t[i - 1])
         v.append(sp)
     dt = [0.0] + [min(5.0, max(0.0, t[i] - t[i - 1])) for i in range(1, len(t))]
-    return {"t": t, "d": d, "v": v, "hr": [p.get("hr") for p in pts], "cad": [p.get("cadence") for p in pts],
+    hr = [p.get("hr") for p in pts]
+    clipped = _clipped_plateau(hr, t)
+    for i in clipped:
+        hr[i] = None
+    return {"t": t, "d": d, "v": v, "hr": hr, "clipped_s": len(clipped), "cad": [p.get("cadence") for p in pts],
             "alt": [p["alt_raw"] if p.get("alt_raw") is not None else p.get("alt") for p in pts], "dt": dt,
             "moving": [x is not None and x >= MOVING_MS for x in v]}
 
 
 def _mean(xs):
     return sum(xs) / len(xs)
+
+
+def _clipped_plateau(hr, t):
+    """Indices of a heart rate stuck for CLIP_SECONDS or more at exactly the maximum of the run: a real heart rate at its peak keeps
+    moving by a beat or two, so this is a ceiling of the recording chain (seen in intervals.icu exports, where a maximum heart rate set too
+    low for the sport cuts the real values). Those samples are left out: they would pass for a steady heart rate against a speed that keeps rising."""
+    vals = [h for h in hr if h is not None]
+    if not vals or min(vals) == max(vals):
+        return []                                                  # no heart rate, or a constant one: no peak to be clipped
+    top, out, i = max(vals), [], 0
+    while i < len(hr):
+        if hr[i] == top:
+            j = i
+            while j + 1 < len(hr) and hr[j + 1] == top:
+                j += 1
+            if t[j] - t[i] >= CLIP_SECONDS:
+                out.extend(range(i, j + 1))
+            i = j + 1
+        else:
+            i += 1
+    return out
 
 
 # ─── Heart-rate zones, TRIMP, training effect ────────────────────────────────
@@ -393,7 +419,7 @@ def run_metrics(pts, athlete, hr_ref=None, speed_ref=None):
         "power_w": watts, "power_wkg": wkg,
         "hrr60": hr_recovery(S), "hr_rise_s": hr_rise_time(S),
         "split_balance_pct": split_balance(S), "pace_cv_pct": pace_variability(S),
-        "hr_max_seen": max(hrs) if hrs else None,
+        "hr_max_seen": max(hrs) if hrs else None, "hr_clipped_s": S["clipped_s"],
         "best": {k: [v[0], v[1]] for k, v in best_efforts(S).items()},
         "efforts": find_efforts(S),
     }
@@ -499,7 +525,8 @@ def compute_all(data_dir, history, athlete, progress=None):
         path = core.session_file(data_dir, row)
         if not path:
             continue
-        stamp = [os.path.getmtime(path), merge_stamp, athlete, speed_ref and round(speed_ref, 3)]
+        fit = core.fit_path(path)                                       # the heart rate comes from the FIT when there is one
+        stamp = [os.path.getmtime(path), merge_stamp, athlete, speed_ref and round(speed_ref, 3), fit and os.path.getmtime(fit)]
         name = os.path.basename(path)
         hit = entries.get(name)
         if hit and hit.get("stamp") == json.loads(json.dumps(stamp)):
@@ -631,6 +658,9 @@ def run_lines(m):
     if m["moving_s"]:
         lines.append(f"Moving time {fmt_time(m['moving_s'])} of {fmt_time(m['elapsed_s'])}")
     z = m["zone_s"]
+    if m.get("hr_clipped_s"):
+        lines.append(f"⚠ The heart rate sits at its maximum for {m['hr_clipped_s']} s: a clipped recording, left out of the metrics "
+                     "(zones, TRIMP and training effect are a minimum). Point the Health Sync folder at the FIT files to get the real values.")
     lines.append("Zones (min): " + "  ".join(f"Z{i} {z[i] / 60:.0f}" for i in range(1, 6)) + f"   TRIMP {m['trimp']:.0f}")
     lines.append(f"Training effect ~{m['te']:.1f} (indicative), recovery ~{m['recovery_h']:.0f} h (indicative)")
     if m["vo2max"]:

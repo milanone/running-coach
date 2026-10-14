@@ -1,6 +1,6 @@
 # running-coach
 
-Command-line analyzer for running sessions exported from [intervals.icu](https://intervals.icu).
+Analyzer (Tkinter window) for running sessions exported from [intervals.icu](https://intervals.icu).
 It reads the activity CSV, computes a few training-load metrics, and keeps a local history so
 each new session can be compared with the previous ones.
 
@@ -42,7 +42,23 @@ mass go in `athlete.json` in the data folder (defaults 190 bpm, 60 bpm, 70 kg), 
 - Not possible with this data: ground contact time, vertical oscillation, HRV, Body Battery, sleep (they need other sensors).
 
 The values are computed in a thread when the **Fitness** tab, or **Charts** on an advanced metric, is opened, and cached in
-`run_metrics_cache.json` in the data folder (recomputed when a CSV, the merges or `athlete.json` change).
+`run_metrics_cache.json` in the data folder (recomputed when a CSV, its FIT file, the merges or `athlete.json` change).
+
+**A heart rate clipped at a ceiling.** intervals.icu treats a heart rate above the maximum set for the sport as a spike and cuts it to
+that maximum: if the *Run* maximum heart rate in Settings (Heart Rate Training Zones) is lower than your real one, every hard stretch shows
+as a flat line at that value in the stream, in the chart and in the CSV, while the watch and the FIT file written by Health Sync have the
+real numbers. A change of that setting does not repair the activities already cut: reprocess them (the activity's Actions menu, *Update
+zones or reprocess original file*) and download the CSV again. Two protections here:
+
+- **Health Sync folder (FIT files, optional)**: when the box at the top of the window points to the folder with the original `.fit` files
+  (the same name as the CSV, `YYYY.MM.DD HH.MM-RUNNING.fit`), the heart rate of a run is read from the FIT instead of the CSV, second by second
+  (the mean of the two records per second). The FIT is used only if its heart rate agrees with the CSV's where the CSV is not clipped
+  (mean difference up to 3 bpm), so a file of another run is ignored. It needs the optional `fitparse` package (`py -m pip install fitparse`);
+  without it, or without the file, the CSV is used. The History columns (HR, EF, drift, TSS) change with *Reprocess all*; the Fitness
+  metrics and the run detail change at once. The environment variable `RUNNING_COACH_FIT` sets the same folder.
+- **Clipped plateaus are left out**: 30 s or more at exactly the maximum heart rate of the run is not a heart rate (a real peak moves by a
+  beat or two). Those seconds are dropped from the metrics (VO2max, pace at a fixed heart rate, efficiency, zones: the TRIMP and the
+  training effect are then a minimum) and the run detail says so.
 
 ### Sources and how far each estimate is checked
 
