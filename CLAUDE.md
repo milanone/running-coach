@@ -45,9 +45,15 @@ folder shown in the first one is a placeholder typed into the entry after loadin
 ## Advanced metrics (`run_metrics.py`)
 
 Pure functions (no Tk), imported by the GUI as `rm`; `run_metrics(pts, athlete, speed_ref)` returns the per-run dict, `compute_all(data_dir,
-history, athlete)` the table over the history (per-file cache `run_metrics_cache.json` keyed by file mtime, merge file mtime, athlete values,
-reference speed and `CACHE_VERSION`: bump it when a formula changes), `summary()` / `summary_lines()` the Fitness tab text, `run_lines()` the
-per-run text. The athlete's parameters (`athlete.json`: `hr_max`, `hr_rest`, `mass_kg`, `cadence_factor`, `hr_ref`, `hr_max_estimated`) live in the private data folder
+history, athlete)` the table over the history (per-file cache `run_metrics_cache.json` keyed by the file's mtime, the mtimes of the recordings merged into it and of its FIT file, the athlete values
+(not age and sex) and `CACHE_VERSION`: bump it when a formula changes. NOT keyed by the reference speed or the merge file: they change with every new
+run or merge, which once made the whole history be read again at every tab open; the heart rate at the reference speed is worked out in
+`compute_all` from `hr_speed_table`, kept with each run). A cold start (no file, a new `CACHE_VERSION`) was 22 s for 37 runs, 85% of it in
+`extract_points` trying six date formats on every second of a CSV whose time is elapsed seconds (`NUMBER` now skips that) and 0.4 s per run in
+reading a FIT (`FIT_MIN_AT_MAX`: only for a CSV that looks clipped); it is ~1.6 s now, serial. A pool of processes was tried (1.2 s) and dropped: it
+saves little and spawning children from a `.pyw` on Windows is fragile. The Fitness tab has a *Recompute all metrics* button (deletes the file), `summary()` the figures behind the Fitness tab, `dashboard(adv, summ)` and `run_panel(m)` that same tab as plain data (the cards: next session,
+training status, VO2max, race predictions, the best efforts; the panel of a run: tiles, zone minutes, repetitions, notes), tested without Tk;
+`summary_lines()` / `run_lines()` are the older text forms, still there. The athlete's parameters (`athlete.json`: `hr_max`, `hr_rest`, `mass_kg`, `cadence_factor`, `hr_ref`, `hr_max_estimated`, `age`, `sex`, `height_cm`) live in the private data folder
 and are Francesco's own; the defaults in the code are generic on purpose (this repo is public: never write his body values here).
 The GUI computes them lazily in a thread (`ensure_fitness`, only when the Fitness tab or Charts on an `adv.` metric is selected): the thread gets
 plain values and a `threading.Event` to cancel, never `self` (a Tk object released in another thread crashes with "Tcl interpreter is leaked").
@@ -91,20 +97,62 @@ What each estimate rests on, and how far it is checked (nothing here is validate
   The acute/chronic ratio with exponential averages (CTL/ATL) swung between 0.4 and 1.5 for a once-a-week runner, so the ratio uses the 7-day
   and 28-day sums instead.
 
+## Fitness tab layout (redone 2026-10-22)
+
+It used to be one wall of text (the advice and the summary in a `tk.Text` at the top, a table, and the detail of a run as text on the right). Now
+`_build_fitness_tab` has a header (message, *Recompute all metrics*), a strip of four cards (`_card`, filled by `_fill_dashboard` from
+`rm.dashboard`: a big headline in the colour of its tone, a line, rows of label and value, selectable notes), a row of the best efforts, the table of
+runs on the left and the panel of the selected run on the right (`_show_fit_panel` from `rm.run_panel`: tiles, `_draw_zone_bar`, a `Treeview` of the
+repetitions, notes; scrollable). The panel has a fixed width and the table gives way (a `PanedWindow` let the panel be cut off at the default window
+size). `apply_fitness` selects the newest run. `fit_message` replaces the old text for "Computing... 12 of 37 runs", errors and a missing
+`athlete.json`; `fit_view` and `fit_panel` hold the data being shown, which is what the tests read. Checked on the real window at 1100x720 and 1250x820.
+Not changed here and open: the best efforts of an interval workout over 3 km include the recoveries, and the Riegel prediction can start from one.
+
 ## Gauges tab
 
 `run_metrics.gauges(m, session, summ)` (pure, tested without Tk) returns one dict per value with a reference range: load ratio and form
 (as of today, from `summ["load"]`), drift and average heart rate as % of the maximum (from the history row), training effect, performance
 condition and heart-rate recovery (from the run's metrics) and the VO2max (`vo2_gauge`: the median of the last five runs against the Cooper Institute's percentiles by decade of age and sex, `VO2MAX_NORMS`: Garmin manuals, two read and identical, the unit is not printed there; 20-79 only; the estimate's own spread is said in the card). Each has its `bands` (from, to, tone, label, advice), the scale `lo`..`hi`, the
 verdict of the band the value falls in, `why` and `source`, and `level`: `sourced` (a source was read: Garmin manual load-ratio table,
-Firstbeat training-effect bands, Cole 1999 for the 12 bpm limit), `secondary` (drift 5/10% from TrainingPeaks articles, form from Friel's
+Firstbeat training-effect bands; heart-rate recovery: Cole 1999 (12 bpm, with a cool-down walk) and Jou et al., Eur J Prev Cardiol 2025;32:32-42, doi 10.1093/eurjpc/zwae308, found 2026-10-22 on
+Consensus and PubMed and then read IN FULL (Francesco put the PDF in the folder; it is gitignored, never commit it): Table 1, quantile regression on 2242 healthy
+people, HRR1 5th percentile = `36.4 + 0.26*age - 0.0051*age^2 - 0.19*resting HR`, 50th percentile = `69.1 - 0.0033*age^2 - 0.21*resting HR - 0.34*BMI` (no
+age term; the first reading of this row through a summariser had garbled it), unisex; `hrr_limits` returns the walking limit (12) and the lying-down one (the
+5th percentile, 18 without an age). IMPORTANT, and I had it backwards at first: the authors say a recovery lying down with no cool-down gives a BIGGER drop than the
+other protocols and their equations may be less relevant when the person stays seated or walks; the literature limits are 12 with a cool-down and 18 supine. The
+median (`hrr_median`) needs the BMI: `athlete.json` has `height_cm` since 2026-10-22 (entered with the Athlete button), and with the age, the mass and the
+height the gauge shows four bands (below the normal range, borderline, normal range, above the median); the median is for lying down, so on foot it is
+conservative. Vicente-Campos 2014 (treadmill, active men: mean 15 bpm) and Kaikkonen 2024 (novice runners,
+passive: 36 bpm) show how much the protocol moves the number), `secondary` (drift 5/10% from TrainingPeaks articles, form from Friel's
 race-day +15 to +25 plus a third-party table, VO2max from the reprinted Cooper tables: the primary texts were not read) or `mine` (the zones as % of the maximum, the performance
 condition bands). Do not add a gauge without a range you can name a source for, and keep `level` honest: that is what the card shows. The VO2max needs `age`
 and `sex` in `athlete.json` (entered with the *Athlete...* button, `edit_athlete` / `apply_athlete`, validated, saved by `run_metrics.write_athlete`, which
-keeps keys it does not know); they are left out of the metrics cache key because they only place the VO2max. The GUI (`_build_gauges_tab`, `draw_gauges`,
+keeps keys it does not know); they are left out of the metrics cache key because they only place the VO2max. The text of the cards is in read-only `tk.Text` widgets (`_selectable`: typing blocked, Ctrl+C and a right-click menu work, the height
+comes from a pixel-measured greedy wrap) so that it can be selected and copied; a label cannot. The GUI (`_build_gauges_tab`, `draw_gauges`,
 `_draw_gauge`) draws each dial on a `tk.Canvas` with `create_arc(style="arc")`, bands as arcs and a needle; `fit_summ` is `gauge_summ`,
 set by `apply_fitness`, so the tab is filled by the same lazy thread as the Fitness tab (`ensure_fitness` also starts it when Gauges is
 selected). The README screenshot is synthetic with the placeholder data path.
+
+## Interval workouts (added 2026-10-22)
+
+Found on Francesco's runs of 2026-10-20 (two recordings of a workout with repetitions, 22 minutes apart): the program had read them as steady
+runs, with a drift of -20% and -16% and an efficiency from the average over the recoveries. `parse_run_csv.detect_intervals(pts)` returns the
+repetitions or `[]`: the 10-s smoothed moving speed must have two levels (90th percentile at least `INTERVAL_CONTRAST` = 1.4 times the 10th),
+fast stretches above the midpoint are merged across gaps under `INTERVAL_MIN_GAP_S` = 20 s and kept from `INTERVAL_MIN_REP_S` = 30 s, and each
+pair of neighbours needs a recovery of `INTERVAL_MIN_RECOVERY_S` to `INTERVAL_MAX_RECOVERY_S` (30 s to 10 min) whose mean speed is at most
+`INTERVAL_RECOVERY_RATIO` = 0.75 of the slower rep; the reps may take at most `INTERVAL_MAX_SHARE` = 70% of the run. The recovery bounds and the
+ratio came from two false positives found by scanning all 40 CSVs (a steady run with a fast finish; one with a fast start and a final sprint): after
+them only the two real sessions are flagged. `analyze_file` then sets `kind` = "intervals" (the history column `kind`), leaves `drift_pct` and
+`ef_m_beat` empty, skips the sprint rule and takes the TSS from `tss_from_points`. `upsert` must not refill a drift or efficiency left blank on
+purpose (nor `kind`), or a reprocess would bring back the old -20%. `compute_recommendations` starts from the last steady run (`base_pace_s`,
+distance), adds one rest day and no progression. `run_metrics.run_metrics` skips VO2max, pace at a heart rate, heart rate at a speed, the efficiency
+window, the rise time, the split balance and the pace variability for such a run and adds `reps` (`rep_details`: pace, heart rate, drop in 60 s
+from the peak, which is the highest 3-s mean from 3 s before the end to 8 s after it because the heart rate lags the effort); `hrr60` is then the
+mean of those drops (`hrr60_n` of them), not the drop after the end of the run, which is a cool-down. `ef_reps` (distance per heartbeat over the
+repetitions) gives the performance condition against the median of up to ten earlier interval workouts, from the third on (`perf_n` counts them;
+with fewer the gauge says what it needs). The gauges say "not for an interval workout" for the drift only and compute the intensity over the
+repetitions only. The metrics cache is `CACHE_VERSION` 6. Joining two recordings of one workout is the existing manual *Merge runs*; the program does not do it
+by itself.
 
 ## Clipped heart rate (found 2026-10-14)
 
@@ -114,7 +162,7 @@ values below the ceiling, the real ones above). Cause, read with his API key (`G
 had a `max_hr` equal to that ceiling (the `Ride` one was higher), and intervals.icu cuts a heart rate above the sport's maximum as a spike
 (forum.intervals.icu/t/max-hr-setting-and-hr-incorrectly-fixing-hr-spikes-values/679: raise the top of zone 7 / the maximum, then "Update zones or
 reprocess original file" on the activity). That setting is his account's: not changed from here (ask first). Two protections in the code:
-`parse_run_csv.apply_fit_hr` (the FIT of the same name in `FIT_DIR` replaces the CSV heart rate when it agrees with it below the clip; two records
+`parse_run_csv.apply_fit_hr` (the FIT of the same name in `FIT_DIR`, opened only when the CSV has `FIT_MIN_AT_MAX` = 20 s or more exactly at its maximum, replaces the CSV heart rate when it agrees with it below the clip; two records
 per second are averaged, the first FIT record is second 0 of the CSV; `fitparse` is optional and imported lazily; GUI box *Health Sync folder*,
 `~/.running_coach_gui.json` key `fit_dir`, or `$RUNNING_COACH_FIT`) and `run_metrics._clipped_plateau` (30 s or more at exactly the run's
 maximum is dropped from `series()`; a constant heart rate is not treated as clipped, so synthetic runs are unaffected). The metrics cache key
@@ -173,7 +221,7 @@ The rule for what to merge is manual on purpose (no automatic "same day, short p
 ## History file format
 
 Columns (`HISTORY_FIELDS`): `date` (dd/mm/yyyy), `time`, `dist_km`, `duration_hms`, `pace_minkm`, `avg_hr_bpm`,
-`ef_m_beat`, `drift_pct`, `tss`, `temp_c`, `humidity_pct`, `wind_kmh`.
+`ef_m_beat`, `drift_pct`, `tss`, `temp_c`, `humidity_pct`, `wind_kmh`, `kind` ("intervals" or empty).
 Sessions are keyed by (ISO date, time), dates are accepted as dd/mm/yyyy or yyyy-mm-dd, and a re-import keeps the weather already recorded.
 
 **Legs removed (2026-10-13):** the subjective "legs" rating (`legs`, asked after each run, +1 rest day / shorter run / slower

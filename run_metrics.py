@@ -18,7 +18,7 @@ import parse_run_csv as core
 
 ATHLETE_FILE = "athlete.json"
 CACHE_FILE = "run_metrics_cache.json"
-CACHE_VERSION = 3                        # bump when a formula changes: the cached per-run metrics are recomputed
+CACHE_VERSION = 6                        # bump when a formula changes: the cached per-run metrics are recomputed
 DEFAULT_ATHLETE = {
     "hr_max": 190,                       # bpm
     "hr_rest": 60,                       # bpm
@@ -26,6 +26,7 @@ DEFAULT_ATHLETE = {
     "cadence_factor": None,              # 1 or 2: the CSV cadence is per foot when ~88 (x2 = steps/min); None = decide from the data
     "hr_ref": None,                      # heart rate used for "pace at a fixed heart rate"; None = 60% of the heart-rate reserve
     "hr_max_estimated": None,            # True when hr_max is a formula or a guess, not measured: the VO2max is then also given for hr_max +- 15
+    "height_cm": None,                   # with the mass gives the body mass index, which the median heart-rate recovery of the Gauges tab needs
     "age": None,                         # years: with the sex, places the VO2max against the Cooper Institute's norms (Gauges tab)
     "sex": None,                         # "M" or "F"
 }
@@ -54,6 +55,8 @@ def read_athlete(data_dir):
         pass
     sex = str(athlete["sex"]).strip().upper()[:1] if athlete["sex"] else None
     athlete["sex"] = sex if sex in ("M", "F") else None
+    height = athlete["height_cm"]
+    athlete["height_cm"] = height if isinstance(height, (int, float)) and not isinstance(height, bool) and 100 <= height <= 230 else None
     age = athlete["age"]
     athlete["age"] = age if isinstance(age, (int, float)) and not isinstance(age, bool) and 10 <= age <= 110 else None
     return athlete
@@ -276,6 +279,40 @@ def hr_at_speed(S, v_ref, tol=0.4 / 3.6, minimum=240):
     return statistics.median(hs) if len(hs) >= minimum else None
 
 
+def hr_speed_table(S, step=0.05):
+    """The steady part of a run as {speed bin (step km/h): {heart rate: seconds}}, so that the heart rate at ANY reference speed can be found later
+    without reading the run again (the reference speed is the median pace of the history and moves with every new run)."""
+    table = {}
+    for i in _steady(S):
+        h, v = S["hr"][i], S["v"][i]
+        if h is not None and v is not None:
+            bins = table.setdefault(str(round(v * 3.6 / step)), {})
+            key = str(int(round(h)))
+            bins[key] = bins.get(key, 0) + 1
+    return table
+
+
+def hr_at_speed_from_table(table, v_ref, step=0.05, tol_kmh=0.4, minimum=240):
+    """hr_at_speed from hr_speed_table (the bins make the limits of the +-0.4 km/h window fuzzy by half a bin)."""
+    if not table or not v_ref:
+        return None
+    centre = v_ref * 3.6 / step
+    reach = tol_kmh / step
+    counts = {}
+    for b, hrs in table.items():
+        if abs(int(b) - centre) <= reach:
+            for h, n in hrs.items():
+                counts[int(h)] = counts.get(int(h), 0) + n
+    total = sum(counts.values())
+    if total < minimum:
+        return None
+    seen, half = 0, total / 2.0
+    for h in sorted(counts):
+        seen += counts[h]
+        if seen >= half:
+            return float(h)
+
+
 def ef_window(S, start=360.0, end=1200.0):
     """Efficiency (m/beat) between minute 6 and 20: the same stretch of every run, for the performance-condition comparison."""
     idx = [i for i, ok in enumerate(S["moving"]) if ok and start <= S["t"][i] <= end and S["hr"][i] and S["v"][i]]
@@ -421,36 +458,72 @@ def find_efforts(S, rise_kmh=1.0, min_s=60):
 
 # ─── One run ─────────────────────────────────────────────────────────────────
 
+def rep_details(S, reps):
+    """The repetitions of an interval workout with what the per-second series adds: pace, heart rate, and the heart-rate drop from the peak to
+    60 s after the end of each (None when the next repetition starts before that or the recording ends)."""
+    t, hr = S["t"], S["hr"]
+
+    def hr_around(sec, half):
+        i, j = bisect.bisect_left(t, sec - half), bisect.bisect_right(t, sec + half)
+        vals = [h for h in hr[i:j] if h is not None]
+        return _mean(vals) if vals else None
+
+    def hr_peak(sec):
+        """The highest 3-s average heart rate from 3 s before the end of a repetition to 8 s after it (the heart rate lags the effort)."""
+        i, j = bisect.bisect_left(t, sec - 3), bisect.bisect_right(t, sec + 8)
+        vals = [h for h in hr[i:j] if h is not None]
+        return max(sum(vals[k:k + 3]) / len(vals[k:k + 3]) for k in range(len(vals))) if vals else None
+
+    out = []
+    for k, r in enumerate(reps):
+        nxt = reps[k + 1]["start"] if k + 1 < len(reps) else None
+        end_hr, later_hr = hr_peak(r["end"]), hr_around(r["end"] + 60, 2)
+        ok = end_hr is not None and later_hr is not None and (nxt is None or nxt >= r["end"] + 62) and t[-1] >= r["end"] + 62
+        out.append({"start": r["start"], "dur": r["dur"], "dist": r["dist"], "pace": r["dur"] / r["dist"] * 1000 if r["dist"] > 0 else None,
+                    "hr": r["hr"], "hr_max": r["hr_max"], "drop60": end_hr - later_hr if ok else None})
+    return out
+
+
 def run_metrics(pts, athlete, hr_ref=None, speed_ref=None):
     """All the per-run metrics as a flat dict (None where the data does not allow them). `speed_ref` (m/s) is the speed for
     'heart rate at a fixed speed'; the caller takes it from the history (the median pace)."""
     S = series(pts)
+    reps = core.detect_intervals(pts)
+    steady = not reps                        # repetitions have no steady state: VO2max, pace at a heart rate, efficiency and drift mean nothing
     hr_ref = hr_ref or athlete["hr_ref"] or athlete["hr_rest"] + 0.6 * (athlete["hr_max"] - athlete["hr_rest"])
     zones = zone_seconds(S, athlete)
     trimp = edwards_trimp(zones)
     te = aerobic_te(trimp)
     spm, step, factor = cadence_stats(S, athlete)
     watts, wkg = power_estimate(S, athlete)
-    pace_hr = pace_at_hr(S, hr_ref)
+    pace_hr = pace_at_hr(S, hr_ref) if steady else None
     hrs = [h for h in S["hr"] if h is not None]
-    guess = athlete.get("hr_max_estimated")
+    guess = athlete.get("hr_max_estimated") and steady
+    details = rep_details(S, reps)
+    drops = [r["drop60"] for r in details if r["drop60"] is not None]
+    rep_hr = [(r["hr"], r["dur"]) for r in details if r["hr"]]
+    rep_dist = sum(r["dist"] for r in details)
+    rep_time = sum(r["dur"] for r in details)
     return {
         "vo2max_if_hrmax_low": vo2max_estimate(S, dict(athlete, hr_max=athlete["hr_max"] - HRMAX_MARGIN)) if guess else None,
         "vo2max_if_hrmax_high": vo2max_estimate(S, dict(athlete, hr_max=athlete["hr_max"] + HRMAX_MARGIN)) if guess else None,
         "moving_s": sum(dt for dt, ok in zip(S["dt"], S["moving"]) if ok),
         "elapsed_s": S["t"][-1],
         "zone_s": zones, "trimp": trimp, "te": te, "recovery_h": recovery_hours(te),
-        "vo2max": vo2max_estimate(S, athlete),
+        "vo2max": vo2max_estimate(S, athlete) if steady else None,
         "hr_ref": hr_ref, "pace_at_hr": pace_hr,
-        "hr_at_speed": hr_at_speed(S, speed_ref) if speed_ref else None,
-        "ef_window": ef_window(S),
+        "hr_at_speed": hr_at_speed(S, speed_ref) if speed_ref and steady else None,
+        "hr_speed_table": hr_speed_table(S) if steady else {},
+        "ef_window": ef_window(S) if steady else None,
         "spm": spm, "step_m": step, "cadence_factor": factor,
         "power_w": watts, "power_wkg": wkg,
-        "hrr60": hr_recovery(S), "hr_rise_s": hr_rise_time(S),
-        "split_balance_pct": split_balance(S), "pace_cv_pct": pace_variability(S),
+        "hrr60": _mean(drops) if drops else hr_recovery(S), "hrr60_n": len(drops), "hr_rise_s": hr_rise_time(S) if steady else None,
+        "ef_reps": rep_dist / rep_time * 60 / (sum(h * d for h, d in rep_hr) / sum(d for _, d in rep_hr)) if rep_hr and rep_time > 0 else None,
+        "split_balance_pct": split_balance(S) if steady else None, "pace_cv_pct": pace_variability(S) if steady else None,
         "hr_max_seen": max(hrs) if hrs else None, "hr_clipped_s": S["clipped_s"],
         "best": {k: [v[0], v[1]] for k, v in best_efforts(S).items()},
-        "efforts": find_efforts(S),
+        "efforts": find_efforts(S) if steady else [],
+        "reps": details,
     }
 
 
@@ -529,9 +602,21 @@ def median_speed(history):
     return statistics.median(sp) if sp else None
 
 
+def _compute_one(path, athlete):
+    """The metrics of one run, or None if the file cannot be used."""
+    try:
+        return run_metrics(core.analyze_file(path, fetch=False)["points"], athlete)
+    except (ValueError, OSError):
+        return None
+
+
 def compute_all(data_dir, history, athlete, progress=None):
     """Per-run metrics for every history row that has a CSV, newest last, with the performance condition and the load added.
-    The per-run results are cached in `run_metrics_cache.json` (keyed by file, modification time, athlete and reference speed)."""
+    The per-run results are kept in `run_metrics_cache.json`, keyed by the file's modification time (and those of the recordings merged into
+    it, and of its FIT file) and the athlete's parameters. Not by anything of the other runs (the reference speed, the merge file): those change
+    with every new run or merge and would make the whole history be read again; the heart rate at the reference speed is worked out from a
+    small table kept with each run. Only the runs that are missing from the file or changed are read (the first time, or after a change of
+    formula: about 0.04 s a run); `progress(done, total)` is called as they finish."""
     speed_ref = median_speed(history)
     cache_path = os.path.join(data_dir, CACHE_FILE)
     try:
@@ -543,38 +628,39 @@ def compute_all(data_dir, history, athlete, progress=None):
         cache = {}
     cache["version"] = CACHE_VERSION
     entries = cache.setdefault("runs", {})
-    merge_stamp = 0.0
-    try:
-        merge_stamp = os.path.getmtime(os.path.join(data_dir, core.MERGE_FILE))
-    except OSError:
-        pass
-    rows, dirty = [], False
-    ordered = sorted(history, key=core.session_key)
-    for n, row in enumerate(ordered):
+    merged = core.merged_members(data_dir)
+    per_run = {k: v for k, v in athlete.items() if k not in ("age", "sex", "height_cm")}      # these only place a value in the gauges
+    plan = []                                                                               # [row, name, path, stamp, metrics or None]
+    for row in sorted(history, key=core.session_key):
         path = core.session_file(data_dir, row)
         if not path:
             continue
-        fit = core.fit_path(path)                                       # the heart rate comes from the FIT when there is one
-        per_run = {k: v for k, v in athlete.items() if k not in ("age", "sex")}               # these two only place the VO2max in the gauges
-        stamp = [os.path.getmtime(path), merge_stamp, per_run, speed_ref and round(speed_ref, 3), fit and os.path.getmtime(fit)]
+        fit = core.fit_path(path)
         name = os.path.basename(path)
+        members = [os.path.join(data_dir, x) for x in merged.get(name, [])]
+        stamp = [os.path.getmtime(path), [os.path.getmtime(x) for x in members if os.path.exists(x)], per_run, fit and os.path.getmtime(fit)]
         hit = entries.get(name)
-        if hit and hit.get("stamp") == json.loads(json.dumps(stamp)):
-            m = hit["metrics"]
-        else:
-            try:
-                m = run_metrics(core.analyze_file(path, fetch=False)["points"], athlete, speed_ref=speed_ref)
-            except (ValueError, OSError):
-                continue
-            entries[name] = {"stamp": stamp, "metrics": m}
-            dirty = True
+        plan.append([row, name, path, stamp, hit["metrics"] if hit and hit.get("stamp") == json.loads(json.dumps(stamp)) else None])
+    misses = [p for p in plan if p[4] is None]
+    total, ready = len(plan), len(plan) - len(misses)
+    if progress:
+        progress(ready, total)
+    for k, p in enumerate(misses, 1):
+        p[4] = _compute_one(p[2], athlete)
+        if p[4] is not None:
+            entries[p[1]] = {"stamp": p[3], "metrics": p[4]}
+        if progress:
+            progress(ready + k, total)
+    rows = []
+    for row, name, path, stamp, m in plan:
+        if m is None:
+            continue
         m = dict(m)
+        m["hr_at_speed"] = hr_at_speed_from_table(m.get("hr_speed_table"), speed_ref)
         m.update(date=core.session_key(row)[0], time=core.session_key(row)[1], file=name,
                  tss=core.safe_float(row.get("tss")), dist_km=core.safe_float(row.get("dist_km")))
         rows.append(m)
-        if progress:
-            progress(n + 1, len(ordered))
-    if dirty:
+    if misses:
         try:
             with open(cache_path, "w", encoding="utf-8") as f:
                 json.dump(cache, f)
@@ -582,6 +668,11 @@ def compute_all(data_dir, history, athlete, progress=None):
             pass
     # performance condition: the efficiency of minutes 6-20 against the median of the previous ten runs, in %
     for i, m in enumerate(rows):
+        if m.get("reps"):                         # the efficiency of the repetitions against that of the earlier interval workouts
+            before = [x["ef_reps"] for x in rows[:i] if x.get("reps") and x.get("ef_reps")][-10:]
+            m["perf_n"] = len(before)
+            m["perf_pct"] = (m["ef_reps"] / statistics.median(before) - 1) * 100 if m.get("ef_reps") and len(before) >= 3 else None
+            continue
         before = [x["ef_window"] for x in rows[max(0, i - 10):i] if x["ef_window"]]
         m["perf_pct"] = (m["ef_window"] / statistics.median(before) - 1) * 100 if m["ef_window"] and len(before) >= 3 else None
     load = {e["date"]: e for e in training_load(history)}
@@ -653,7 +744,7 @@ def next_session(history, rows, summ, today=None):
             notes.append(("\u2022", f"Load ratio {ratio:.2f}: the last 7 days are below your 4-week average, there is room to run more"))
     easy = [r["pace_at_hr"] for r in rows if r.get("pace_at_hr")]
     if easy:
-        base = last.get("_pace_s") or core.parse_pace(last.get("pace_minkm")) or 390
+        base = rec["base_pace_s"]
         pace = statistics.median(easy[-3:]) + (rec["pace_s"] - base)           # the core's +-5 s adjustment is kept
         hr = rows[-1]["hr_ref"]
         notes.append(("\u2022", f"Easy pace {core.format_pace(statistics.median(easy[-3:]))}/km: your pace at {hr:.0f} bpm in the last 3 runs"))
@@ -726,10 +817,53 @@ TE_BANDS = [
     (3.0, 4.0, "good", "Improving", "A solid stimulus: this kind of run raises your fitness."),
     (4.0, 5.0, "good", "Highly improving", "A hard session: needs a proper recovery before the next."),
 ]
-HRR_BANDS = [
-    (0, 12, "bad", "Slow", "In Cole's 1999 study of patients a drop of 12 bpm or less in the first minute after exercise was linked to a higher risk of death."),
-    (12, 60, "good", "Not abnormal", "The heart rate fell faster than that threshold. A faster fall generally goes with better fitness."),
-]
+HRR_WALKING_LIMIT = 12.0     # bpm: Cole et al., N Engl J Med 1999;341:1351-7, with a cool-down period after the exercise
+HRR_LYING_LIMIT = 18.0       # bpm: the limit usually used when the person lies down at once (cited in Jou et al. 2025, discussion), without an age
+
+
+def hrr_limits(athlete):
+    """(limit with a cool-down walk, limit lying down at once) for the heart-rate drop in the first minute after exercise, in bpm. The second is,
+    with an age, the 5th percentile of apparently healthy people in Jou et al., Eur J Prev Cardiol 2025;32:32-42 (cycle test with no cool-down, lying down
+    at once; 2242 healthy of 9917 people aged 18-85): 36.4 + 0.26 * age - 0.0051 * age^2 - 0.19 * resting heart rate (Table 1, the same for men and
+    women), and never below the first. The authors say that lying down gives a bigger drop than the other protocols, so these equations are less
+    relevant for a recovery on foot, which is why both limits are kept."""
+    age = athlete.get("age")
+    if age is None:
+        return HRR_WALKING_LIMIT, HRR_LYING_LIMIT
+    age = min(85.0, max(18.0, float(age)))
+    return HRR_WALKING_LIMIT, max(HRR_WALKING_LIMIT, 36.4 + 0.26 * age - 0.0051 * age * age - 0.19 * athlete["hr_rest"])
+
+
+def hrr_median(athlete):
+    """The median (50th percentile) of the first-minute heart-rate drop for this age, resting heart rate and body mass index, from the same table of Jou
+    et al. 2025: 69.1 - 0.0033 * age^2 - 0.21 * resting heart rate - 0.34 * BMI (no linear age term). None without an age or a height."""
+    age, height, mass = athlete.get("age"), athlete.get("height_cm"), athlete.get("mass_kg")
+    if age is None or not height or not mass:
+        return None
+    age = min(85.0, max(18.0, float(age)))
+    bmi = mass / (height / 100.0) ** 2
+    return 69.1 - 0.0033 * age * age - 0.21 * athlete["hr_rest"] - 0.34 * bmi
+
+
+def hrr_bands(walking, lying, median=None):
+    low = (0, walking, "bad", "Below the normal range",
+           f"Below {walking:.0f} bpm, the limit even for a recovery with a walk: a blunted recovery, linked in studies to a higher risk of death. It can also "
+           "come from fatigue, heat or illness: look at more than one run.")
+    mid = (walking, lying, "warn", "Borderline",
+           f"Under the {lying:.0f} bpm of a recovery lying down at once, above the {walking:.0f} bpm of one with a cool-down walk: normal if you walked or "
+           "stood, low if you lay down.")
+    high = (lying, 60, "good", "Normal range",
+            "Above the limit for a recovery lying down at once, so normal for any recovery. No band for good or excellent is published: a bigger drop "
+            "generally goes with better fitness, so compare it with your own earlier runs.")
+    bands = [low, mid, high] if lying > walking else [low, (walking, 60, "good", "Normal range", high[4])]
+    if median is not None and median > bands[-1][0] + 1:             # the typical value splits the normal range in two
+        top = bands.pop()
+        bands += [(top[0], median, "good", "Normal range", top[4]),
+                  (median, 60, "great", "Above the median", "Above the median of healthy people of your age, resting heart rate and body mass index: a faster "
+                                                            "recovery than the typical one. No band for excellent is published, so compare it with your own earlier runs.")]
+    return bands
+
+
 INTENSITY_BANDS = [
     (40, 50, "info", "Very light", "Below zone 1: walking or a very easy jog."),
     (50, 60, "ok", "Zone 1", "Warm-up or recovery effort."),
@@ -800,6 +934,30 @@ def gauges(m, session, summ):
         low_base = f"With only {load['acute']:.0f} TSS in 7 days the base is small, so this is a ramp-up from little, not a spike."
     drift = core.safe_float(session.get("drift_pct"))
     avg_hr = core.safe_float(session.get("avg_hr_bpm"))
+    reps = m.get("reps") or []
+    hrr_walk, hrr_lie = hrr_limits(athlete)
+    hrr_med = hrr_median(athlete)
+    if athlete.get("age") is not None:
+        hrr_lie_text = (f"{hrr_lie:.0f} bpm at your age and resting heart rate (the 5th percentile of 2,242 healthy people in a Swedish study of 9,917, Jou et al. 2025)"
+                        if hrr_lie > hrr_walk else f"{hrr_walk:.0f} bpm too at your age")
+    else:
+        hrr_lie_text = f"{hrr_lie:.0f} bpm (set your age with the Athlete button to get one for your age and resting heart rate)"
+    hrr_why = (f"How the heart rate recovers depends on how you recover. The published limit is {hrr_walk:.0f} bpm with a slow cool-down walk (Cole et al. 1999) and, "
+               f"lying down at once, {hrr_lie_text}. Lying down gives a bigger drop than the other protocols, so on foot a value between the two limits is still normal."
+               + (f" The typical (median) drop of healthy people like you is {hrr_med:.0f} bpm lying down." if hrr_med else
+                  " Give your height with the Athlete button to also see the typical (median) drop for your age."))
+    hrr_source = ("Cole et al., N Engl J Med 1999;341:1351-7 (PubMed 10536127): 12 bpm, with a cool-down. Jou et al., Eur J Prev Cardiol 2025;32:32-42, "
+                  "doi 10.1093/eurjpc/zwae308 (full text read): 5th percentile lying down = 36.4 + 0.26 age - 0.0051 age^2 - 0.19 resting heart rate, the same for "
+                  "men and women; the median is 69.1 - 0.0033 age^2 - 0.21 resting heart rate - 0.34 body mass index (needs your height).")
+    not_steady = "Not for an interval workout: the heart rate rises and falls by design."
+    if reps:
+        n_before = m.get("perf_n", 0)
+        condition_extra = ("Efficiency of the repetitions against your earlier interval workouts." if m.get("perf_pct") is not None else
+                           f"Needs at least 3 earlier interval workouts to compare with (there are {n_before}).")
+        hrr_extra = f"It is the mean of the {m['hrr60_n']} recoveries after a repetition: the drop from the peak at the end of the effort to 60 s later (after a repetition you walk, and the published limits differ with how people recover)." if m.get("hrr60_n") else ""
+    if reps:                                           # the average of the whole run would count the recoveries
+        drift = None
+        avg_hr = sum(r["hr"] * r["dur"] for r in reps if r["hr"]) / sum(r["dur"] for r in reps if r["hr"]) if any(r["hr"] for r in reps) else None
     pct = avg_hr / athlete["hr_max"] * 100 if avg_hr else None
     return [
         _gauge("load_ratio", "Load ratio (now)", ratio, f"{ratio:.2f}" if ratio is not None else "-", 0.0, 3.0, LOAD_RATIO_BANDS,
@@ -815,11 +973,12 @@ def gauges(m, session, summ):
                "How much the heart rate rose from the first to the second half of the run (warm-up and final sprint left out). At a steady pace "
                "it is the same as aerobic decoupling; if you sped up or slowed down it also mixes in the pace.",
                "TrainingPeaks, 'Aerobic endurance and decoupling': under 5% strong, 5-10% moderate, over 10% limited. The advice of this "
-               "program uses its own 6% and 8% thresholds.", "secondary"),
+               "program uses its own 6% and 8% thresholds.", "secondary", not_steady if reps else ""),
         _gauge("intensity", "Average heart rate (% of max)", pct, f"{pct:.0f} %" if pct is not None else "-", 40, 100, INTENSITY_BANDS,
                "The average heart rate of the run as a percentage of your maximum, in the program's zones (Garmin's default percentages). "
                "It tells how hard the run was on average, not whether it was good.",
-               "Zone percentages: Garmin's defaults, as the program uses them (from memory, not re-read).", "mine"),
+               "Zone percentages: Garmin's defaults, as the program uses them (from memory, not re-read).", "mine",
+               "Over the repetitions only: the recoveries are left out." if reps else ""),
         _gauge("te", "Training effect (indicative)", m.get("te"), f"{m['te']:.1f}" if m.get("te") is not None else "-", 0.0, 5.0, TE_BANDS,
                "How much the run trains the aerobic system, from 0 to 5, computed from the time in the heart-rate zones. The 0-5 reading is "
                "Firstbeat's; this value is NOT their calculation and is not calibrated against a watch.",
@@ -827,16 +986,126 @@ def gauges(m, session, summ):
         vo2_gauge(summ, athlete),
         _gauge("condition", "Performance condition", m.get("perf_pct"), f"{m['perf_pct']:+.1f} %" if m.get("perf_pct") is not None else "-", -20, 20,
                CONDITION_BANDS,
-               "The efficiency (speed per heartbeat) of minutes 6-20 of the run against the median of your previous ten runs. Heat, sleep, "
+               "The efficiency (speed per heartbeat) of minutes 6-20 of the run against the median of your previous ten runs; for an interval workout, "
+               "of the repetitions against your earlier interval workouts (only comparable between workouts of a similar structure). Heat, sleep, "
                "hills and caffeine all move it.",
-               "A scale of this program, shaped like Garmin's -20 to +20; the bands at +-5 and +-10 are rules of thumb.", "mine"),
+               "A scale of this program, shaped like Garmin's -20 to +20; the bands at +-5 and +-10 are rules of thumb.", "mine",
+               condition_extra if reps else ""),
         _gauge("hrr", "Heart-rate recovery, 60 s", m.get("hrr60"), f"{m['hrr60']:.0f} bpm" if m.get("hrr60") is not None else "-", 0, 60,
-               HRR_BANDS,
-               "How many beats per minute the heart rate dropped in the minute after the run ended. The study measured it right after a "
-               "maximal treadmill test, and your run usually ends at an easy effort and a few steps of walking, so read it as a trend.",
-               "Cole et al., N Engl J Med 1999;341:1351-7 (PubMed 10536127): 12 bpm or less is abnormal. Only the lower limit is a published one.",
-               "sourced"),
+               hrr_bands(hrr_walk, hrr_lie, hrr_med),
+               "How many beats per minute the heart rate dropped in the minute after the effort (after the run; in an interval workout, after each "
+               "repetition). " + hrr_why,
+               hrr_source, "sourced", hrr_extra if reps else ""),
     ]
+
+
+# ─── Structured view of the Fitness tab ──────────────────────────────────────
+
+STATUS_TONE = {"Productive": "good", "Maintaining": "ok", "Recovery": "info", "Unproductive": "warn", "Ramping up": "warn",
+               "Strained": "bad", "Overreaching": "bad", "Detraining": "warn", "Not enough history": "info"}
+
+
+def _days(n):
+    return f"{n} {'day' if n == 1 else 'days'}"
+
+
+def dashboard(adv, summ):
+    """What the top of the Fitness tab shows, as plain data: {next, load, vo2, races, best, footer}. Each card is {headline, tone, sub, rows [(label,
+    value)], notes}; None where there is nothing to show. `adv` is next_session()'s result, `summ` summary()'s."""
+    out = {"next": None, "load": None, "vo2": None, "races": None, "best": [], "footer": ""}
+    if adv:
+        last = adv["last"]
+        ready = adv["ready_in"] == 0
+        trend = {"improving": "↑ improving", "declining": "↓ declining"}.get(adv["ef_trend"], "-")
+        kind = "interval workout" if last.get("kind") == "intervals" else "run"
+        out["next"] = {"headline": "Ready now" if ready else f"Ready in {_days(adv['ready_in'])}", "tone": "good" if ready else "warn",
+                       "sub": f"Rest {_days(adv['rest'])} after the {kind} of {last['date']} {last['time']} ({last['dist_km']} km, {_days(adv['since'])} ago)",
+                       "rows": [("Distance", f"{adv['dist_km']:.1f} km"), ("Pace", f"{core.format_pace(adv['pace_s'])} /km"), ("Efficiency trend", trend)],
+                       "notes": list(adv["notes"])}
+    if not summ:
+        return out
+    a = summ["athlete"]
+    L = summ["load"]
+    status, reason = summ["status"]
+    rows = []
+    if L:
+        ratio = f"{L['acute'] / L['chronic']:.2f}" if L["chronic"] > 0 else "-"
+        rows = [("Load ratio", ratio), ("Fitness (CTL)", f"{L['ctl']:.1f}"), ("Fatigue (ATL)", f"{L['atl']:.1f}"), ("Form (TSB)", f"{L['tsb']:+.1f}"),
+                ("Load, last 7 days", f"{L['acute']:.0f} TSS")]
+    out["load"] = {"headline": status, "tone": STATUS_TONE.get(status, "info"), "sub": reason, "rows": rows,
+                   "notes": [("•", f"As of {L['date']}.")] if L else []}
+    if "vo2max" in summ:
+        lo, hi = summ["vo2max_range"]
+        vrows, notes = [], [("•", "Estimated from heart rate and speed on steady stretches: read the trend, not the decimals.")]
+        if "vo2max_hrmax_range" in summ:
+            vrows.append((f"If the max HR is {HRMAX_MARGIN} bpm off", f"{summ['vo2max_hrmax_range'][0]:.0f}-{summ['vo2max_hrmax_range'][1]:.0f}"))
+            notes.append(("⚠", "The maximum heart rate is an estimate: the zones, the TRIMP and the training effect move with it."))
+        out["vo2"] = {"headline": f"{summ['vo2max']:.1f}", "unit": "ml/kg/min", "tone": "info",
+                      "sub": f"median of the last runs, range {lo:.1f}-{hi:.1f}", "rows": vrows, "notes": notes}
+    else:
+        out["vo2"] = {"headline": "-", "unit": "", "tone": "info", "sub": "not enough steady stretches yet", "rows": [], "notes": []}
+    if "vdot_races" in summ or "riegel_races" in summ:
+        vd, rg = summ.get("vdot_races", {}), summ.get("riegel_races", {})
+        head = ("From the VO2max", "From your best " + summ["riegel_from"][0] if "riegel_from" in summ else "-")
+        notes = []
+        if vd:
+            notes.append(("•", "VO2max column (Daniels VDOT): what a trained runner with this VO2max would run, optimistic for slow, non-racing runners."))
+        if rg:
+            label, secs, day = summ["riegel_from"]
+            notes.append(("•", f"Best {label} column (Riegel): from {fmt_time(secs)} on {day}; slow, because training is not racing."))
+        out["races"] = {"head": head, "rows": [(k, fmt_time(vd[k]) if k in vd else "-", fmt_time(rg[k]) if k in rg else "-") for k, _ in RACES], "notes": notes}
+    out["best"] = [(k, fmt_time(v[0]), f"{v[1][8:]}/{v[1][5:7]}") for k, v in summ["best"].items()]
+    out["footer"] = (f"Parameters from {ATHLETE_FILE}: max HR {a['hr_max']}{' (estimated)' if a.get('hr_max_estimated') else ''}, "
+                     f"resting HR {a['hr_rest']}, mass {a['mass_kg']} kg. * indicative: not calibrated against a Garmin. "
+                     "Every value is an estimate: read the trends, not the decimals.")
+    return out
+
+
+def run_panel(m):
+    """What the panel of one run shows: {title, subtitle, badge, tiles [(label, value)], zones (minutes in Z1-Z5), reps [rows], notes, warning}."""
+    dash = lambda v, f: "-" if v is None else f(v)
+    tiles = [("Training effect*", f"{m['te']:.1f}"), ("TRIMP", f"{m['trimp']:.0f}"), ("Recovery time*", f"{m['recovery_h']:.0f} h"),
+             ("VO2max", dash(m["vo2max"], lambda v: f"{v:.1f}")),
+             (f"Pace at {m['hr_ref']:.0f} bpm", dash(m["pace_at_hr"], lambda v: core.format_pace(v) + " /km")),
+             ("HR at the usual speed", dash(m["hr_at_speed"], lambda v: f"{v:.0f} bpm")),
+             ("Cadence", dash(m["spm"], lambda v: f"{v:.0f} /min")), ("Step length", dash(m["step_m"], lambda v: f"{v:.2f} m")),
+             ("Power*", dash(m["power_w"], lambda v: f"{v:.0f} W")),
+             ("HR recovery, 60 s", dash(m["hrr60"], lambda v: f"{v:.0f} bpm")),
+             ("Performance condition", dash(m.get("perf_pct"), lambda v: f"{v:+.1f} %"))]
+    reps = [(i, fmt_time(r["start"]), fmt_time(r["dur"]), f"{r['dist']:.0f}", core.format_pace(r["pace"]) if r["pace"] else "-",
+             f"{r['hr']:.0f}" if r["hr"] else "-", f"{r['hr_max']:.0f}" if r["hr_max"] else "-", "-" if r["drop60"] is None else f"{r['drop60']:.0f}")
+            for i, r in enumerate(m.get("reps") or [], 1)]
+    notes = []
+    if m["moving_s"]:
+        notes.append(("•", f"Moving time {fmt_time(m['moving_s'])} of {fmt_time(m['elapsed_s'])}."))
+    if m.get("reps"):
+        work = sum(r["dur"] for r in m["reps"])
+        notes.append(("•", f"{len(m['reps'])} repetitions, {fmt_time(work)} of work ({work / m['elapsed_s'] * 100:.0f}% of the run). VO2max, pace at a heart rate, "
+                                "efficiency and drift need a steady effort and are not computed."))
+        first, last = m["reps"][0], m["reps"][-1]
+        if len(m["reps"]) >= 2 and first["pace"] and last["pace"] and first["hr"] and last["hr"]:
+            notes.append(("•", f"First to last repetition: pace {last['pace'] - first['pace']:+.0f} s/km, heart rate {last['hr'] - first['hr']:+.0f} bpm."))
+        if m.get("hrr60_n"):
+            notes.append(("•", f"Heart-rate recovery: mean of the {m['hrr60_n']} recoveries after a repetition, from the peak."))
+        if m.get("perf_pct") is None:
+            notes.append(("•", f"Performance condition needs at least 3 earlier interval workouts to compare with ({m.get('perf_n', 0)} so far)."))
+    if m.get("split_balance_pct") is not None:
+        notes.append(("•", f"Second half {m['split_balance_pct']:+.1f}% vs the first" +
+                      (f", km times vary {m['pace_cv_pct']:.1f}%." if m.get("pace_cv_pct") is not None else ".")))
+    if m.get("hr_rise_s") is not None:
+        notes.append(("•", f"Heart-rate rise time (63%): {m['hr_rise_s']:.0f} s."))
+    if m.get("best"):
+        notes.append(("•", "Best in this run: " + ", ".join(f"{k} {fmt_time(v[0])}" for k, v in m["best"].items()) + "."))
+    for e in m.get("efforts") or []:
+        notes.append(("•", f"Effort at {fmt_time(e['start'])}: {fmt_time(e['dur'])}, {e['dist']:.0f} m" + (f", {core.format_pace(e['pace'])}/km" if e["pace"] else "")
+                      + (f", HR {e['hr']:.0f}" if e["hr"] else "")))
+    warning = ""
+    if m.get("hr_clipped_s"):
+        warning = (f"⚠ The heart rate sits at its maximum for {m['hr_clipped_s']} s: a clipped recording, left out of the metrics (zones, TRIMP and training "
+                   "effect are a minimum). Point the Health Sync folder at the FIT files to get the real values.")
+    d = m["date"]
+    return {"title": f"{d[8:]}/{d[5:7]}/{d[:4]}  {m['time']}", "subtitle": f"{m['dist_km'] or 0:.2f} km", "badge": "INTERVALS" if m.get("reps") else "",
+            "tiles": tiles, "zones": [m["zone_s"][i] / 60.0 for i in range(1, 6)], "reps": reps, "notes": notes, "warning": warning}
 
 
 # ─── Text for the GUI ────────────────────────────────────────────────────────
@@ -850,6 +1119,17 @@ def run_lines(m):
     if m.get("hr_clipped_s"):
         lines.append(f"⚠ The heart rate sits at its maximum for {m['hr_clipped_s']} s: a clipped recording, left out of the metrics "
                      "(zones, TRIMP and training effect are a minimum). Point the Health Sync folder at the FIT files to get the real values.")
+    if m.get("reps"):
+        reps = m["reps"]
+        work = sum(r["dur"] for r in reps)
+        lines.append(f"INTERVAL WORKOUT: {len(reps)} repetitions, {fmt_time(work)} of work in {fmt_time(m['elapsed_s'])} ({work / m['elapsed_s'] * 100:.0f}%). "
+                     "VO2max, pace at a heart rate, efficiency and drift are not computed: they need a steady effort.")
+        for i, r in enumerate(reps, 1):
+            lines.append(f"  Rep {i} at {fmt_time(r['start'])}: {fmt_time(r['dur'])}, {r['dist']:.0f} m" +
+                         (f", {core.format_pace(r['pace'])}/km" if r["pace"] else "") + (f", HR {r['hr']:.0f} (max {r['hr_max']:.0f})" if r["hr"] else "") +
+                         (f", HR down {r['drop60']:.0f} bpm in the next 60 s" if r["drop60"] is not None else ""))
+        if len(reps) >= 2 and reps[0]["pace"] and reps[-1]["pace"] and reps[0]["hr"] and reps[-1]["hr"]:
+            lines.append(f"  First to last: pace {reps[-1]['pace'] - reps[0]['pace']:+.0f} s/km, heart rate {reps[-1]['hr'] - reps[0]['hr']:+.0f} bpm")
     lines.append("Zones (min): " + "  ".join(f"Z{i} {z[i] / 60:.0f}" for i in range(1, 6)) + f"   TRIMP {m['trimp']:.0f}")
     lines.append(f"Training effect ~{m['te']:.1f} (indicative), recovery ~{m['recovery_h']:.0f} h (indicative)")
     if m["vo2max"]:
@@ -863,9 +1143,12 @@ def run_lines(m):
     if m["power_w"]:
         lines.append(f"Power ~{m['power_w']:.0f} W ({m['power_wkg']:.2f} W/kg), a rough model")
     if m.get("perf_pct") is not None:
-        lines.append(f"Performance condition {m['perf_pct']:+.1f}% (efficiency of minutes 6-20 against your last runs)")
+        lines.append(f"Performance condition {m['perf_pct']:+.1f}% (" + ("efficiency of the repetitions against your earlier interval workouts)"
+                     if m.get("reps") else "efficiency of minutes 6-20 against your last runs)"))
+    elif m.get("reps"):
+        lines.append(f"Performance condition: needs at least 3 earlier interval workouts to compare the repetitions with ({m.get('perf_n', 0)} so far)")
     if m["hrr60"] is not None:
-        lines.append(f"HR recovery in 60 s: {m['hrr60']:.0f} bpm")
+        lines.append(f"HR recovery in 60 s: {m['hrr60']:.0f} bpm" + (f" (mean of {m['hrr60_n']} recoveries after a repetition, from the peak)" if m.get("hrr60_n") else ""))
     if m["hr_rise_s"] is not None:
         lines.append(f"HR rise time (63%): {m['hr_rise_s']:.0f} s")
     if m["split_balance_pct"] is not None:

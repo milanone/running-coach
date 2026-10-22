@@ -3,7 +3,7 @@ import json, os, sys, tempfile, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 import parse_run_csv as P
-from synth import write_run
+from synth import write_run, write_intervals_run
 
 
 def load(**kw):
@@ -339,6 +339,81 @@ class ParseRunTests(unittest.TestCase):
             self.assertEqual(pts[330]["hr"], cap + 20)                            # the clipped seconds have the real heart rate
             self.assertEqual(pts[100]["hr"], before[100])                         # the mean of the two records of that second
             self.assertEqual(P.fit_path(path), None)                              # FIT_DIR is unset again outside the patch
+
+    def test_the_fit_file_is_read_only_when_the_csv_looks_clipped(self):
+        import types, unittest.mock as mock
+        name = "2026.05.07 07.51-RUNNING.csv"
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, name)
+            write_run(path, icu_format=True)
+            fit_dir = os.path.join(d, "fit")
+            os.mkdir(fit_dir)
+            open(os.path.join(fit_dir, name[:-4] + ".fit"), "wb").close()
+            opened = []
+            stub = types.ModuleType("fitparse")
+            stub.FitFile = lambda p: opened.append(p) or types.SimpleNamespace(get_messages=lambda kind: [])
+            pts = P.extract_points(P.load_csv(path), P.filename_start(path))
+            for k, p in enumerate(pts):
+                p["hr"] = 130 + k % 7                                                       # a heart rate that moves, with a peak of a few seconds
+            for p in pts[100:104]:
+                p["hr"] = 160
+            top = 160
+            with mock.patch.object(P, "FIT_DIR", fit_dir), mock.patch.dict(sys.modules, {"fitparse": stub}):
+                self.assertFalse(P.apply_fit_hr(pts, path))
+                self.assertEqual(opened, [])                                                # a natural peak: the FIT is not even opened
+                for p in pts[:P.FIT_MIN_AT_MAX]:
+                    p["hr"] = top                                                           # a long stay exactly at the maximum
+                P.apply_fit_hr(pts, path)
+                self.assertEqual(len(opened), 1)
+
+    def test_interval_workout_is_recognised_and_steady_runs_are_not(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "2026.05.20 07.30-RUNNING.csv")
+            write_intervals_run(path)
+            res = P.analyze_file(path, fetch=False)
+            s = res["session"]
+            self.assertEqual(s["kind"], "intervals")
+            self.assertEqual(len(res["reps"]), 3)
+            self.assertAlmostEqual(res["reps"][0]["dur"], 180, delta=15)
+            self.assertAlmostEqual(res["reps"][0]["speed"], 3.3, delta=0.3)
+            self.assertEqual((s["drift_pct"], s["ef_m_beat"]), ("", ""))             # not defined without a steady state
+            self.assertFalse(res["is_sprint"])
+            # the TSS second by second counts the hard seconds more than the average heart rate would
+            self.assertGreater(s["tss"], P.compute_tss(res["dur_s"], res["avg_hr"]))
+            for kw in ({}, {"sprint": True}, {"km": 3.0, "base_speed": 2.0}):        # steady runs, with or without a final sprint
+                steady = os.path.join(d, "2026.05.21 07.30-RUNNING.csv")
+                write_run(steady, icu_format=True, **kw)
+                r = P.analyze_file(steady, fetch=False)
+                self.assertEqual((r["reps"], r["session"]["kind"]), ([], ""))
+            self.assertEqual(P.analyze_file(steady, fetch=False)["is_sprint"], False)
+            write_run(steady, icu_format=True, sprint=True)
+            self.assertTrue(P.analyze_file(steady, fetch=False)["is_sprint"])          # the sprint rule still works on a steady run
+            # two repetitions with a recovery that is as fast as they are, or too short: not an interval workout
+            write_intervals_run(path, fast=3.3, slow=3.0)
+            self.assertEqual(P.analyze_file(path, fetch=False)["reps"], [])
+            write_intervals_run(path, rest_s=10)
+            self.assertEqual(P.analyze_file(path, fetch=False)["session"]["kind"], "")
+
+    def test_reprocessing_an_interval_workout_does_not_bring_back_drift_and_efficiency(self):
+        old = {"date": "20/05/2026", "time": "07:30", "drift_pct": "-20.2", "ef_m_beat": "0.98", "tss": "23", "kind": "", "temp_c": "12"}
+        new = {"date": "20/05/2026", "time": "07:30", "drift_pct": "", "ef_m_beat": "", "tss": "24", "kind": "intervals", "temp_c": ""}
+        out = P.upsert([old], new)[0]
+        self.assertEqual((out["drift_pct"], out["ef_m_beat"], out["kind"]), ("", "", "intervals"))
+        self.assertEqual(out["temp_c"], "12")                                               # the weather is still kept
+        back = P.upsert([dict(new)], {"date": "20/05/2026", "time": "07:30", "drift_pct": "3", "kind": "", "tss": "30"})[0]
+        self.assertEqual(back["kind"], "")                                                  # and a run that is no longer one stays steady
+
+    def test_advice_after_an_interval_workout_starts_from_the_last_steady_run(self):
+        steady = [{"date": f"0{d}/05/2026", "time": "07:00", "dist_km": "5.0", "pace_minkm": "7:30", "tss": "40", "drift_pct": "2",
+                   "ef_m_beat": "0.90", "kind": ""} for d in (1, 4, 7)]
+        hard = {"date": "10/05/2026", "time": "07:00", "dist_km": "2.4", "pace_minkm": "8:10", "tss": "25", "drift_pct": "", "ef_m_beat": "",
+                "kind": "intervals"}
+        after_steady = P.compute_recommendations(steady, steady[-1])
+        after_hard = P.compute_recommendations(steady + [hard], hard)
+        self.assertEqual(after_hard["rest"], after_steady["rest"] + 1)
+        self.assertEqual(after_hard["dist_km"], 5.0)                                        # not the 2.4 km of the workout
+        self.assertEqual(after_hard["base_pace_s"], 450)                                    # 7:30 of the last steady run, not 8:10
+        self.assertTrue(any("interval" in text for _, text in after_hard["notes"]))
 
     def test_ef_and_tss(self):
         self.assertAlmostEqual(P.compute_ef(5.0, 2250, 155), 5000 / (155 * 37.5), places=3)

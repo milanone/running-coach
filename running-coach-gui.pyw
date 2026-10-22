@@ -12,6 +12,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
@@ -87,6 +88,8 @@ TABLE_COLUMNS = [
 ]
 
 
+FIT_CARD_W, FIT_PANEL_W = 235, 330                                     # widths in pixels of the cards and of the panel of a run
+ZONE_FILL = ["#7aa7d9", "#4caf73", "#e6c04a", "#e8903a", "#d95050"]      # zones 1 to 5
 GAUGE_W, GAUGE_H = 300, 168
 GAUGE_FILL = {"great": "#2e8b57", "good": "#4caf73", "ok": "#e6c04a", "warn": "#e8903a", "bad": "#d95050", "info": "#7aa7d9"}        # the bands of a gauge
 GAUGE_TEXT = {"great": "#1b6b3e", "good": "#1f7a45", "ok": "#8a6d00", "warn": "#b35f10", "bad": "#b02a2a", "info": "#3d6ea8"}        # the verdict text
@@ -753,25 +756,161 @@ class App(tk.Tk):
         tab = ttk.Frame(self.tabs)
         self.fit_tab = tab
         self.tabs.add(tab, text="Fitness")
-        self.fit_summary = tk.Text(tab, height=13, wrap="word", relief="flat", state="disabled", background=self.cget("background"),
-                                   font=("TkDefaultFont", 10))
-        self.fit_summary.pack(fill="x", padx=10, pady=(8, 4))
+        head = ttk.Frame(tab)
+        head.pack(fill="x", padx=10, pady=(8, 2))
+        self.fit_message = tk.StringVar(value="")
+        ttk.Label(head, textvariable=self.fit_message, foreground="#b35f10").pack(side="left")
+        ttk.Button(head, text="Recompute all metrics", command=self.recompute_fitness).pack(side="right")
+        ttk.Label(head, text="The metrics of a run are kept in a file and recomputed only when the run changes.",
+                  foreground="#666").pack(side="right", padx=10)
+        self.fit_strip = ttk.Frame(tab)                                   # the four cards
+        self.fit_strip.pack(fill="x", padx=8)
+        self.fit_best = ttk.Frame(tab)                                    # the best efforts
+        self.fit_best.pack(fill="x", padx=10, pady=(4, 0))
         body = ttk.Frame(tab)
-        body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        body.pack(fill="both", expand=True, padx=8, pady=(6, 2))
+        left = ttk.Frame(body)
         cols = [c[0] for c in FITNESS_COLUMNS]
-        self.fit_tree = ttk.Treeview(body, columns=cols, show="headings", selectmode="browse")
+        self.fit_tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
         for key, title, width, _ in FITNESS_COLUMNS:
             self.fit_tree.heading(key, text=title)
             self.fit_tree.column(key, width=width, anchor="center", stretch=False)
+        sb = ttk.Scrollbar(left, orient="vertical", command=self.fit_tree.yview)
+        self.fit_tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
         self.fit_tree.pack(side="left", fill="both", expand=True)
         self.fit_tree.bind("<<TreeviewSelect>>", lambda e: self.fit_show())
-        self.fit_detail = tk.Text(body, width=58, wrap="word", relief="flat", state="disabled", background=self.cget("background"),
-                                  font=("TkDefaultFont", 10))
-        self.fit_detail.pack(side="left", fill="y", padx=(10, 0))
+        right = ttk.Frame(body)
+        self.fit_canvas = tk.Canvas(right, highlightthickness=0, background=self.cget("background"), width=FIT_PANEL_W + 24)
+        psb = ttk.Scrollbar(right, orient="vertical", command=self.fit_canvas.yview)
+        self.fit_canvas.configure(yscrollcommand=psb.set)
+        psb.pack(side="right", fill="y")
+        self.fit_canvas.pack(side="left", fill="both", expand=True)
+        self.fit_inner = ttk.Frame(self.fit_canvas, padding=(10, 0, 4, 6))
+        self.fit_canvas.create_window((0, 0), window=self.fit_inner, anchor="nw")
+        self.fit_inner.bind("<Configure>", lambda e: self.fit_canvas.configure(scrollregion=self.fit_canvas.bbox("all")))
+        self.fit_canvas.bind("<MouseWheel>", lambda e: self.fit_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        right.pack(side="right", fill="y", padx=(8, 0))               # the panel of a run keeps its width, the table gives way
+        left.pack(side="left", fill="both", expand=True)
+        self.fit_footer = ttk.Label(tab, text="", foreground="#666", font=("TkDefaultFont", 8), wraplength=1050, justify="left")
+        self.fit_footer.pack(side="bottom", fill="x", padx=10, pady=(0, 6), before=body)       # first in the packing order: kept in view when the window is short
         self.fit_rows, self.adv = [], {}
+        self.fit_view, self.fit_panel = None, None
         self.fit_queue = queue.Queue()
         self.fit_job, self.fit_thread, self.fit_id, self.fit_cancel, self.fit_stale = None, None, 0, None, True
         self.athlete = dict(rm.DEFAULT_ATHLETE)
+
+    def _card(self, col, title, card, wide=False):
+        """One card of the strip: a title, a big headline, a line under it, rows of label and value, and notes (selectable)."""
+        frame = ttk.LabelFrame(self.fit_strip, text=title, padding=(10, 4, 10, 8))
+        frame.grid(row=0, column=col, sticky="nsew", padx=4, pady=2)
+        self.fit_strip.columnconfigure(col, weight=1, uniform="card")
+        if card is None:
+            ttk.Label(frame, text="Nothing to show yet.", foreground="#888").pack(anchor="w")
+            return frame
+        if card.get("table"):                                           # the race predictions: a small table instead of a headline
+            table = ttk.Frame(frame)
+            table.pack(anchor="w", fill="x")
+            for c, text in enumerate(card["table"]["head"], 1):
+                ttk.Label(table, text=text, foreground="#666", font=("TkDefaultFont", 8), wraplength=84, justify="right").grid(row=0, column=c, sticky="e", padx=(10, 0))
+            for r, cells in enumerate(card["table"]["rows"], 1):
+                ttk.Label(table, text=cells[0]).grid(row=r, column=0, sticky="w")
+                for c, text in enumerate(cells[1:], 1):
+                    ttk.Label(table, text=text, font=("TkDefaultFont", 10, "bold")).grid(row=r, column=c, sticky="e", padx=(10, 0))
+            table.columnconfigure(0, weight=1)
+        else:
+            line = ttk.Frame(frame)
+            line.pack(anchor="w", fill="x")
+            ttk.Label(line, text=card["headline"], font=("TkDefaultFont", 17, "bold"), foreground=GAUGE_TEXT.get(card.get("tone"), "#222")).pack(side="left")
+            if card.get("unit"):
+                ttk.Label(line, text=" " + card["unit"], foreground="#666").pack(side="left", pady=(7, 0))
+            if card.get("sub"):
+                ttk.Label(frame, text=card["sub"], foreground="#555", wraplength=FIT_CARD_W, justify="left").pack(anchor="w", pady=(0, 4))
+            grid = ttk.Frame(frame)
+            grid.pack(anchor="w", fill="x")
+            for r, (label, value) in enumerate(card.get("rows", [])):
+                ttk.Label(grid, text=label, foreground="#666").grid(row=r, column=0, sticky="w")
+                ttk.Label(grid, text=value, font=("TkDefaultFont", 10, "bold")).grid(row=r, column=1, sticky="e", padx=(14, 0))
+            grid.columnconfigure(0, weight=1)
+        if card.get("notes"):
+            self._selectable(frame, "\n".join(f"{i} {t}" for i, t in card["notes"]), ("TkDefaultFont", 8), "#555", pixels=FIT_CARD_W, pady=(6, 0))
+        return frame
+
+    def _fill_dashboard(self, view):
+        """The strip of cards and the best efforts, from rm.dashboard()'s data."""
+        for w in list(self.fit_strip.winfo_children()) + list(self.fit_best.winfo_children()):
+            w.destroy()
+        view = view or {"next": None, "load": None, "vo2": None, "races": None, "best": [], "footer": ""}
+        self._card(0, "NEXT SESSION", view["next"])
+        self._card(1, "TRAINING STATUS", view["load"])
+        self._card(2, "VO2MAX (ESTIMATE)", view["vo2"])
+        races = view["races"]
+        self._card(3, "RACE PREDICTIONS", {"table": races, "notes": races["notes"]} if races else None)
+        if view["best"]:
+            ttk.Label(self.fit_best, text="Best efforts", foreground="#666").pack(side="left", padx=(0, 10))
+            for label, secs, day in view["best"]:
+                chip = ttk.Frame(self.fit_best, padding=(0, 0, 14, 0))
+                chip.pack(side="left")
+                ttk.Label(chip, text=label + " ", foreground="#666").pack(side="left")
+                ttk.Label(chip, text=secs, font=("TkDefaultFont", 10, "bold")).pack(side="left")
+                ttk.Label(chip, text=f" ({day})", foreground="#888", font=("TkDefaultFont", 8)).pack(side="left")
+        self.fit_footer.configure(text=view["footer"])
+
+    def _show_fit_panel(self, panel):
+        """The panel of the selected run: tiles, the time in each zone as a bar, the repetitions, notes."""
+        for w in self.fit_inner.winfo_children():
+            w.destroy()
+        self.fit_panel = panel
+        if not panel:
+            ttk.Label(self.fit_inner, text="Select a run in the table.", foreground="#888", padding=10).pack(anchor="w")
+            return
+        top = ttk.Frame(self.fit_inner)
+        top.pack(anchor="w", fill="x", pady=(2, 6))
+        ttk.Label(top, text=panel["title"], font=("TkDefaultFont", 13, "bold")).pack(side="left")
+        ttk.Label(top, text="   " + panel["subtitle"], foreground="#555").pack(side="left")
+        if panel["badge"]:
+            ttk.Label(top, text=" " + panel["badge"] + " ", foreground="white", background=GAUGE_FILL["info"], font=("TkDefaultFont", 8, "bold")).pack(side="left", padx=8)
+        tiles = ttk.Frame(self.fit_inner)
+        tiles.pack(anchor="w", fill="x")
+        for i, (label, value) in enumerate(panel["tiles"]):
+            tile = ttk.Frame(tiles, padding=(0, 0, 14, 6))
+            tile.grid(row=i // 3, column=i % 3, sticky="w")
+            ttk.Label(tile, text=label, foreground="#777", font=("TkDefaultFont", 8)).pack(anchor="w")
+            ttk.Label(tile, text=value, font=("TkDefaultFont", 11, "bold"), foreground="#222" if value != "-" else "#aaa").pack(anchor="w")
+        ttk.Label(self.fit_inner, text="Time in each heart-rate zone", foreground="#777", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(4, 0))
+        bar = tk.Canvas(self.fit_inner, width=FIT_PANEL_W, height=44, highlightthickness=0, background=self.cget("background"))
+        bar.pack(anchor="w")
+        self._draw_zone_bar(bar, panel["zones"])
+        if panel["reps"]:
+            ttk.Label(self.fit_inner, text="Repetitions", foreground="#777", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(8, 2))
+            cols = ("n", "start", "time", "m", "pace", "hr", "max", "drop")
+            reps = ttk.Treeview(self.fit_inner, columns=cols, show="headings", height=len(panel["reps"]), selectmode="none")
+            for key, title, width in (("n", "#", 24), ("start", "Start", 46), ("time", "Time", 46), ("m", "m", 42), ("pace", "Pace", 46),
+                                      ("hr", "HR", 36), ("max", "Max", 36), ("drop", "Drop 60s", 56)):
+                reps.heading(key, text=title)
+                reps.column(key, width=width, anchor="center", stretch=False)
+            for row in panel["reps"]:
+                reps.insert("", "end", values=row)
+            reps.pack(anchor="w")
+        if panel["warning"]:
+            self._selectable(self.fit_inner, panel["warning"], ("TkDefaultFont", 9, "bold"), GAUGE_TEXT["bad"], pixels=FIT_PANEL_W, pady=(8, 0))
+        if panel["notes"]:
+            self._selectable(self.fit_inner, "\n".join(f"{i} {t}" for i, t in panel["notes"]), ("TkDefaultFont", 9), "#444", pixels=FIT_PANEL_W, pady=(8, 0))
+
+    def _draw_zone_bar(self, cv, minutes):
+        total = sum(minutes)
+        if total <= 0:
+            cv.create_text(4, 14, text="no heart rate", anchor="w", fill="#888")
+            return
+        x = 0.0
+        for z, m in enumerate(minutes, 1):
+            w = FIT_PANEL_W * m / total
+            if w > 0:
+                cv.create_rectangle(x, 4, x + w, 24, fill=ZONE_FILL[z - 1], outline="")
+                if w >= 26:
+                    cv.create_text(x + w / 2, 14, text=f"Z{z}", fill="white", font=("TkDefaultFont", 8, "bold"))
+            cv.create_text(x + w / 2, 35, text=f"{m:.0f}'" if m >= 0.5 else "", fill="#555", font=("TkDefaultFont", 8))
+            x += w
 
     # ── athlete parameters ───────────────────────────────────────────────
     def edit_athlete(self):
@@ -786,7 +925,7 @@ class App(tk.Tk):
         win.transient(self)
         win.resizable(False, False)
         fields = [("hr_max", "Maximum heart rate (bpm)"), ("hr_rest", "Resting heart rate (bpm)"), ("mass_kg", "Mass (kg)"),
-                  ("age", "Age (years)")]
+                  ("age", "Age (years)"), ("height_cm", "Height (cm)")]
         vars_ = {k: tk.StringVar(value="" if a[k] is None else f"{a[k]:g}") for k, _ in fields}
         sex = tk.StringVar(value=a["sex"] or "")
         estimated = tk.BooleanVar(value=bool(a["hr_max_estimated"]))
@@ -822,12 +961,12 @@ class App(tk.Tk):
         """Check the texts of the dialog, save them to athlete.json and recompute. Raises ValueError with a message for the user."""
         d = self._dir()
         limits = {"hr_max": (100, 230, "Maximum heart rate"), "hr_rest": (25, 120, "Resting heart rate"), "mass_kg": (30, 250, "Mass"),
-                  "age": (10, 110, "Age")}
+                  "age": (10, 110, "Age"), "height_cm": (100, 230, "Height")}
         values = {}
         for k, (lo, hi, name) in limits.items():
             text = str(texts.get(k, "")).strip().replace(",", ".")
             if not text:
-                if k == "age":
+                if k in ("age", "height_cm"):
                     values[k] = None                                  # age is optional; the others keep the defaults when empty
                     continue
                 raise ValueError(f"{name} is needed.")
@@ -837,7 +976,7 @@ class App(tk.Tk):
                 raise ValueError(f"{name}: '{text}' is not a number.") from None
             if not lo <= v <= hi:
                 raise ValueError(f"{name} should be between {lo} and {hi}.")
-            values[k] = int(v) if k in ("hr_max", "hr_rest", "age") else v
+            values[k] = int(v) if k in ("hr_max", "hr_rest", "age", "height_cm") else v
         if sex not in ("", "M", "F"):
             raise ValueError("Sex is M or F.")
         values["sex"] = sex or None
@@ -897,15 +1036,52 @@ class App(tk.Tk):
             cv = tk.Canvas(card, width=GAUGE_W, height=GAUGE_H, highlightthickness=0, background=self.cget("background"))
             cv.pack()
             self._draw_gauge(cv, g)
-            verdict = ttk.Label(card, text=f"{g['label']}: {g['advice']}" if g["value"] is not None else (g["advice"] or "No data for this run."),
-                                wraplength=430, justify="left", font=("TkDefaultFont", 10, "bold"))
-            verdict.pack(anchor="w", pady=(4, 2))
-            if g["value"] is not None:
-                verdict.configure(foreground=GAUGE_TEXT[g["tone"]])
-            ttk.Label(card, text=g["why"], wraplength=430, justify="left").pack(anchor="w", pady=2)
-            ttk.Label(card, text=f"Reference ({GAUGE_LEVEL[g['level']]}): {g['source']}", wraplength=430, justify="left",
-                      foreground="#666", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(2, 0))
+            verdict = f"{g['label']}: {g['advice']}" if g["value"] is not None else (g["advice"] or "No data for this run.")
+            self._selectable(card, verdict, ("TkDefaultFont", 10, "bold"), GAUGE_TEXT[g["tone"]] if g["value"] is not None else None, pady=(4, 2))
+            self._selectable(card, g["why"], ("TkDefaultFont", 10), pady=2)
+            self._selectable(card, f"Reference ({GAUGE_LEVEL[g['level']]}): {g['source']}", ("TkDefaultFont", 8), "#666", pady=(2, 0))
             self.gauge_cards.append((card, g))
+
+    def _selectable(self, parent, text, font, foreground=None, pixels=430, pady=(0, 0)):
+        """A block of text that can be selected and copied (Ctrl+C, or the menu of a right click) but not edited: a Text widget with the
+        typing keys blocked, sized to the lines the text wraps to (a label cannot be selected)."""
+        f = tkfont.Font(root=self, font=font)
+        lines, line = 1, ""
+        for paragraph in text.split("\n"):
+            for word in paragraph.split():                  # the same greedy wrapping as the widget, measured in pixels
+                trial = f"{line} {word}".strip()
+                if line and f.measure(trial) > pixels - 6:
+                    lines, line = lines + 1, word
+                else:
+                    line = trial
+            lines, line = lines + 1, ""
+        lines -= 1
+        box = tk.Text(parent, width=max(10, pixels // f.measure("0")), height=max(1, lines), wrap="word", relief="flat", borderwidth=0,
+                      highlightthickness=0, padx=0, pady=0, background=self.cget("background"), font=font, cursor="arrow")
+        if foreground:
+            box.configure(foreground=foreground)
+        box.insert("1.0", text)
+
+        def key(event):
+            ctrl = event.state & 0x4
+            return None if ctrl and event.keysym.lower() in ("c", "a") else "break"    # copy and select all only
+
+        def select_all(event):
+            event.widget.tag_add("sel", "1.0", "end-1c")
+            return "break"
+
+        box.bind("<Key>", key)
+        box.bind("<Control-a>", select_all)
+        box.bind("<Button-1>", lambda e: box.focus_set())
+        box.bind("<Button-3>", lambda e: self._copy_menu(e, box))
+        box.pack(anchor="w", pady=pady)
+        return box
+
+    def _copy_menu(self, event, box):
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Copy", command=lambda: box.event_generate("<<Copy>>"))
+        menu.add_command(label="Select all", command=lambda: box.tag_add("sel", "1.0", "end-1c"))
+        menu.tk_popup(event.x_root, event.y_root)
 
     def _draw_gauge(self, cv, g):
         """A half-circle scale with the bands as coloured arcs and a needle at the value."""
@@ -937,6 +1113,17 @@ class App(tk.Tk):
         widget.delete("1.0", "end")
         widget.insert("1.0", text)
         widget.configure(state="disabled")
+
+    def recompute_fitness(self):
+        """On request: throw away the file with the per-run metrics and compute them all again."""
+        d = self._dir()
+        if not d:
+            return
+        try:
+            os.remove(os.path.join(d, rm.CACHE_FILE))
+        except OSError:
+            pass
+        self.start_fitness()
 
     def start_fitness(self):
         """The history changed, so the metrics are stale. They are computed when a tab that shows them is the selected one."""
@@ -972,11 +1159,12 @@ class App(tk.Tk):
             self.fit_cancel.set()
         cancel = self.fit_cancel = threading.Event()
         job, history, athlete, out = self.fit_id, list(self.history), dict(self.athlete), self.fit_queue
-        self._write(self.fit_summary, "Computing the advanced metrics...")
+        self.fit_message.set("Computing the advanced metrics...")
 
         def abort(n, total):
             if cancel.is_set():
                 raise InterruptedError
+            out.put((job, "progress", n, total))
 
         def work():
             try:
@@ -996,7 +1184,12 @@ class App(tk.Tk):
         self.fit_job = None
         try:
             while True:
-                job, rows, summ = self.fit_queue.get_nowait()
+                item = self.fit_queue.get_nowait()
+                if len(item) == 4:                                   # (job, "progress", done, total)
+                    if item[0] == self.fit_id and self.fit_thread is not None and self.fit_thread.is_alive():
+                        self.fit_message.set(f"Computing the advanced metrics... {item[2]} of {item[3]} runs")
+                    continue
+                job, rows, summ = item
                 if job == self.fit_id:
                     self.apply_fitness(job, rows, summ)
         except queue.Empty:
@@ -1015,36 +1208,39 @@ class App(tk.Tk):
 
     def apply_fitness(self, job, rows, summ):
         self.fit_tree.delete(*self.fit_tree.get_children())
-        self._write(self.fit_detail, "")
         self.gauge_summ = summ if isinstance(summ, dict) else None
+        self.fit_view = None
         if rows is None:
             self.fit_rows, self.adv = [], {}
-            self._write(self.fit_summary, summ)
+            self.fit_message.set(summ)
+            self._fill_dashboard(None)
+            self._show_fit_panel(None)
             self.draw_gauges()
             return
         self.fit_rows = rows
         self.adv = {(m["date"], m["time"]): m for m in rows}
         for i in range(len(rows) - 1, -1, -1):           # newest first
             self.fit_tree.insert("", "end", iid=str(i), values=[c[3](rows[i]) for c in FITNESS_COLUMNS])
-        if summ:
-            text = "\n".join(rm.next_session_lines(rm.next_session(self.history, rows, summ)) + [""] + rm.summary_lines(summ))
-            d = self._dir()
-            if d and not os.path.exists(os.path.join(d, rm.ATHLETE_FILE)):
-                text += f"\nNo {rm.ATHLETE_FILE} in the data folder: default parameters. Put your own in it, e.g. {{\"hr_max\": 185, \"hr_rest\": 55, \"mass_kg\": 70}}."
-            self._write(self.fit_summary, text)
+        d = self._dir()
+        if not summ:
+            self.fit_message.set("Import some runs to see the advanced metrics.")
+        elif d and not os.path.exists(os.path.join(d, rm.ATHLETE_FILE)):
+            self.fit_message.set(f"No {rm.ATHLETE_FILE} in the data folder: default parameters. Set yours with the Athlete button.")
         else:
-            self._write(self.fit_summary, "Import some runs to see the advanced metrics.")
+            self.fit_message.set("")
+        if summ:
+            self.fit_view = rm.dashboard(rm.next_session(self.history, rows, summ), summ)
+        self._fill_dashboard(self.fit_view)
+        kids = self.fit_tree.get_children()
+        if kids:
+            self.fit_tree.selection_set(kids[0])         # the newest run
+        self.fit_show()
         self.draw_chart()
         self.draw_gauges()
 
     def fit_show(self):
         sel = self.fit_tree.selection()
-        if not sel:
-            self._write(self.fit_detail, "")
-            return
-        m = self.fit_rows[int(sel[0])]
-        self._write(self.fit_detail, f"{m['date']} {m['time']}   {m['dist_km'] or 0:.2f} km\n\n" + "\n".join(rm.run_lines(m)) +
-                    "\n\n* indicative: the scale is not calibrated against a Garmin.")
+        self._show_fit_panel(rm.run_panel(self.fit_rows[int(sel[0])]) if sel else None)
 
     def _metric_value(self, row, key):
         if key.startswith("adv."):
@@ -1083,6 +1279,8 @@ class App(tk.Tk):
             return
         lines = [f"{row['date']} {row['time']}   {row['dist_km']} km   {row['duration_hms']}   {row['pace_minkm']}/km",
                  f"HR {row['avg_hr_bpm']} bpm   EF {row['ef_m_beat']}   Drift {row['drift_pct']}%   TSS {row['tss']}"]
+        if row.get("kind") == "intervals":
+            lines.append("Interval workout: the drift and the efficiency are not defined for it; the repetitions are listed in the Fitness tab.")
         if row.get("temp_c"):
             lines.append(f"Weather: {row['temp_c']}°C  {row.get('humidity_pct', '')}% humidity  {row.get('wind_kmh', '')} km/h wind")
         d = self._dir()

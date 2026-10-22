@@ -42,8 +42,24 @@ mass go in `athlete.json` in the data folder (defaults 190 bpm, 60 bpm, 70 kg), 
   (Daniels-Gilbert VDOT) and from your best recent effort (Riegel, slow because training is not racing); all-time best efforts.
 - Not possible with this data: ground contact time, vertical oscillation, HRV, Body Battery, sleep (they need other sensors).
 
+**Interval workouts.** A run with repetitions and recoveries has no steady effort, so the numbers made for a steady one (drift, efficiency,
+VO2max, pace at a heart rate) would be wrong for it: the heart rate of a repetition is climbing and the recovery
+drags the average down. The program recognises such a session from the speed alone: two or more fast stretches of at least 30 s, each pair
+separated by a recovery (30 s to 10 min) that is clearly slower, taking at most 70% of the run. It then marks the row `intervals` in the
+history, leaves the drift and the efficiency empty, computes the TSS second by second (the square of the intensity factor averaged over the
+seconds, not of the average heart rate), lists the repetitions (time, distance, pace, heart rate, the heart-rate drop in the next 60 s, and the
+change from the first to the last) in the Fitness tab, and starts the advice for the next run from your last steady run (one more rest day, no
+progression). The zones, the TRIMP, the training effect and the best efforts are still computed, and two numbers take a form that suits
+repetitions: the **heart-rate recovery** is the mean drop from the peak to 60 s after the end of each repetition, and the **performance
+condition** compares the efficiency of the repetitions with that of your earlier interval workouts (it needs at least three, and the
+workouts have to be of a similar structure to be comparable). It is a heuristic: a run with a long walking
+break could be taken for one, and a workout with very short or irregular repetitions may not be recognised. Of the 40 runs it was tried on, only the two
+real interval sessions were marked. Two recordings of one workout can be joined with *Merge runs*.
+
 The values are computed in a thread when the **Fitness** tab, or **Charts** on an advanced metric, is opened, and cached in
-`run_metrics_cache.json` in the data folder (recomputed when a CSV, its FIT file, the merges or `athlete.json` change).
+`run_metrics_cache.json` in the data folder (a run is recomputed only when its CSV, a recording merged into it, its FIT file or the athlete parameters change; a new run or a merge elsewhere
+recomputes nothing). The first time, or after an update that changes a formula, every run is read once (about two seconds for 40 runs, and the tab shows the
+progress); the **Recompute all metrics** button of the Fitness tab does it on request.
 
 **A heart rate clipped at a ceiling.** intervals.icu treats a heart rate above the maximum set for the sport as a spike and cuts it to
 that maximum: if the *Run* maximum heart rate in Settings (Heart Rate Training Zones) is lower than your real one, every hard stretch shows
@@ -52,8 +68,8 @@ real numbers. A change of that setting does not repair the activities already cu
 zones or reprocess original file*) and download the CSV again. Two protections here:
 
 - **Health Sync folder (FIT files, optional)**: when the box at the top of the window points to the folder with the original `.fit` files
-  (the same name as the CSV, `YYYY.MM.DD HH.MM-RUNNING.fit`), the heart rate of a run is read from the FIT instead of the CSV, second by second
-  (the mean of the two records per second). The FIT is used only if its heart rate agrees with the CSV's where the CSV is not clipped
+  (the same name as the CSV, `YYYY.MM.DD HH.MM-RUNNING.fit`), the heart rate of a run is read from the FIT instead of the CSV when the CSV looks clipped (20 seconds or more exactly at its maximum;
+  otherwise the FIT is not even opened), second by second (the mean of the two records per second). The FIT is used only if its heart rate agrees with the CSV's where the CSV is not clipped
   (mean difference up to 3 bpm), so a file of another run is ignored. It needs the optional `fitparse` package (`py -m pip install fitparse`);
   without it, or without the file, the CSV is used. The History columns (HR, EF, drift, TSS) change with *Reprocess all*; the Fitness
   metrics and the run detail change at once. The environment variable `RUNNING_COACH_FIT` sets the same folder.
@@ -114,14 +130,16 @@ it is remembered in `~/.running_coach_gui.json`), then:
   speed (`velocity_smooth`, shown as km/h or as pace in min/km with the faster pace up), heart rate, cadence, and both `altitude` and
   `fixed_altitude`, against time or distance.
   Moving the mouse shows all the values of that second (with pace and GPS position).
-- **Fitness** opens with the advice for the next session (rest days, distance, pace, from the TSS, the drift, the efficiency trend, the
-  load ratio and your pace at a fixed heart rate), then the advanced metrics: a summary (load, status, VO2max, race predictions, best
-  efforts) and a table with one row per run; select a row for its full list. The same metrics can be plotted over time in **Charts**.
+- **Fitness** is laid out in four cards: the **next session** (when you are ready, distance and pace, from the TSS, the drift, the efficiency
+  trend, the load ratio and your pace at a fixed heart rate, with the reasons), the **training status** (status, load ratio, fitness, fatigue,
+  form), the **VO2max** estimate and the **race predictions**; under them the best efforts, then a table with one row per run and, for the
+  selected run, a panel with its numbers, the time in each heart-rate zone as a bar and, for an interval workout, the list of repetitions. The
+  same metrics can be plotted over time in **Charts**.
 - **Gauges** puts the values that have a reference range on half-circle dials, one card each, for a run chosen at the top (the load ones are
   as of today): load ratio, form (TSB), heart-rate drift, average heart rate as a percentage of the maximum, training effect, performance
   condition, heart-rate recovery and the VO2max. The coloured bands are the reference ranges, the needle is the value, and the card says in words what
-  the band means, what the value is, and where the range comes from: a source that was read (load ratio: Garmin's manual; training effect:
-  Firstbeat; recovery: Cole 1999), secondary sources (drift: TrainingPeaks; form: Friel and a third-party table; VO2max: the Cooper
+  the band means, what the value is, and where the range comes from (the text can be selected and copied): a source that was read (load ratio: Garmin's manual; training effect:
+  Firstbeat; heart-rate recovery: Jou et al. 2025, a 5th percentile for your age and resting heart rate, or Cole 1999 without an age), secondary sources (drift: TrainingPeaks; form: Friel and a third-party table; VO2max: the Cooper
   Institute percentiles as the Garmin manuals reprint them) or a rule of thumb of this program (zones, performance condition). The VO2max is
   placed against the norms for your age (20-79) and sex, which you enter with the **Athlete...** button at the top (it also edits the heart
   rates and the mass); without them the dial asks for them. Values with no published range are not shown.
@@ -154,7 +172,8 @@ fetch them again. Run **Import local CSVs (legacy)** (or the download button) on
 ## The history file
 
 `running_history.csv` has one row per session with the columns `date` (dd/mm/yyyy), `time`, `dist_km`, `duration_hms`,
-`pace_minkm`, `avg_hr_bpm`, `ef_m_beat`, `drift_pct`, `tss`, `temp_c`, `humidity_pct`, and `wind_kmh`.
+`pace_minkm`, `avg_hr_bpm`, `ef_m_beat`, `drift_pct`, `tss`, `temp_c`, `humidity_pct`, `wind_kmh` and `kind` (`intervals` for an interval workout,
+else empty).
 The recommendations use only objective data (TSS, cardiac drift, EF trend); the former subjective "legs" rating was
 removed. Files written by earlier versions (Italian column names such as `data`, `orario`, and the `gambe` / `legs`
 column) are still read: the names are translated and the legs column is dropped the next time the history is saved.
@@ -176,7 +195,8 @@ Personal parameters are constants at the top of the script. Edit them to match y
 environment variable, read at start-up) at a separate folder: the activity CSVs are read from it and
 `running_history.csv` is written to it — for example a private data-only repository cloned next to this one.
 
-Body parameters for the advanced metrics (`hr_max`, `hr_rest`, `mass_kg`, optionally `age` and `sex` (`"M"` or `"F"`, for the VO2max norms of the Gauges tab; the **Athlete...** button writes them), `cadence_factor` 1 or 2, `hr_ref`, and `hr_max_estimated: true` when the maximum heart rate is a formula or a guess, not measured) go in
+Body parameters for the advanced metrics (`hr_max`, `hr_rest`, `mass_kg`, optionally `age` and `sex` (`"M"` or `"F"`, for the VO2max norms of the Gauges tab) and `height_cm` (for the typical heart-rate recovery of your age; the
+**Athlete...** button writes them), `cadence_factor` 1 or 2, `hr_ref`, and `hr_max_estimated: true` when the maximum heart rate is a formula or a guess, not measured) go in
 `athlete.json` in that folder, e.g. `{"hr_max": 190, "hr_rest": 60, "mass_kg": 70}`.
 
 ## Tests

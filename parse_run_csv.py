@@ -31,8 +31,8 @@ LEGACY_FIELDS   = {
 HISTORY_FIELDS  = [
     "date", "time", "dist_km", "duration_hms", "pace_minkm",
     "avg_hr_bpm", "ef_m_beat", "drift_pct", "tss",
-    "temp_c", "humidity_pct", "wind_kmh",
-]
+    "temp_c", "humidity_pct", "wind_kmh", "kind",
+]                                        # kind: "intervals" for an interval workout, else empty
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -144,6 +144,9 @@ def filename_start(path):
     return datetime(*map(int, m.groups())) if m else None
 
 
+NUMBER = re.compile(r"-?\d+(\.\d+)?$")
+
+
 def extract_points(rows, start=None):
     """`time` may be an ISO timestamp or elapsed seconds (intervals.icu); for the latter
     the start datetime comes from `start` (the filename)."""
@@ -162,7 +165,7 @@ def extract_points(rows, start=None):
     pts = []
     for row in rows:
         raw = row.get(ts_col, "") if ts_col else ""
-        ts = parse_ts(raw)
+        ts = None if NUMBER.match(raw) else parse_ts(raw)      # elapsed seconds are most of the rows: do not try six date formats on each
         if ts is None:
             secs = safe_float(raw)
             if secs is None:
@@ -189,6 +192,7 @@ def extract_points(rows, start=None):
 # rate of a run is read from the FIT of the same name instead of the CSV. Needs the optional fitparse package.
 
 FIT_DIR = os.environ.get("RUNNING_COACH_FIT") or None
+FIT_MIN_AT_MAX = 20         # seconds exactly at the run's maximum in the CSV from which it looks clipped; with fewer the FIT file is not even read
 FIT_MAX_MISMATCH = 3.0      # bpm: the mean difference between the CSV and the FIT heart rate (where the CSV is not clipped) above which the FIT is not the same run
 
 
@@ -222,16 +226,19 @@ def read_fit_hr(path):
 
 
 def apply_fit_hr(pts, csv_path):
-    """Replace the heart rate of the points with the FIT file's, second by second, when the FIT belongs to the same run (its heart rate
-    agrees with the CSV's where the CSV is below its own maximum, i.e. not clipped). Returns True if the FIT was used."""
+    """Replace the heart rate of the points with the FIT file's, second by second, when the CSV looks clipped (FIT_MIN_AT_MAX seconds or more
+    exactly at its maximum) and the FIT belongs to the same run (its heart rate agrees with the CSV's where the CSV is below its own maximum).
+    Returns True if the FIT was used."""
     start = filename_start(csv_path)
     fp = fit_path(csv_path)
     if not fp or start is None:
         return False
+    top = max((p["hr"] for p in pts if p["hr"] is not None), default=None)
+    if top is None or sum(1 for p in pts if p["hr"] == top) < FIT_MIN_AT_MAX:
+        return False                                  # a clipped recording sits at its ceiling for many seconds: reading a FIT costs 0.4 s, so only then
     fit = read_fit_hr(fp)
     if not fit:
         return False
-    top = max((p["hr"] for p in pts if p["hr"] is not None), default=None)
     diffs = []
     for p in pts:
         k = int(round((p["ts"] - start).total_seconds()))
@@ -382,6 +389,87 @@ def km_splits(pts):
 
     return splits
 
+# ─── Interval workouts ───────────────────────────────────────────────────────
+
+INTERVAL_MIN_REP_S  = 30     # a fast stretch shorter than this is a stride, not a repetition
+INTERVAL_MIN_GAP_S  = 20     # slower stretches shorter than this (a stumble, a corner) do not split a repetition
+INTERVAL_CONTRAST   = 1.4    # fast over slow moving speed (90th over 10th percentile) needed to speak of repetitions
+INTERVAL_MAX_SHARE  = 0.7    # repetitions that take more of the run than this are a run with walking breaks, not a workout
+INTERVAL_MOVING_MS  = 1.0    # m/s: below this the athlete is standing or walking very slowly
+INTERVAL_MIN_RECOVERY_S = 30   # the recovery between two repetitions lasts at least this
+INTERVAL_MAX_RECOVERY_S = 600  # and at most this: a longer slow stretch is the body of a run with a fast start and a fast finish
+INTERVAL_RECOVERY_RATIO = 0.75   # and is at most this fraction as fast as the slower of the two repetitions around it
+
+
+def point_speeds(pts):
+    """m/s of every point: the speed in the file, else the distance covered since the previous point over the time step."""
+    out = []
+    for i, p in enumerate(pts):
+        v = p.get("speed")
+        if v is None and i:
+            dt = (p["ts"] - pts[i - 1]["ts"]).total_seconds()
+            v = (p["dist_m"] - pts[i - 1]["dist_m"]) / dt if dt > 0 else 0.0
+        out.append(v or 0.0)
+    return out
+
+
+def detect_intervals(pts):
+    """The repetitions of an interval workout, [{start, end, dur, dist, speed, hr, hr_max}] (seconds from the start), or [] for any other run.
+    A run has repetitions when its moving speed has two clearly different levels (90th percentile at least INTERVAL_CONTRAST times the 10th),
+    and the speed (smoothed over about 10 s) goes above the midpoint in at least two separate stretches of at least INTERVAL_MIN_REP_S,
+    each pair of neighbouring ones with a recovery in between that is clearly slower (INTERVAL_RECOVERY_RATIO) and neither too short nor too long, and which
+    together take no more than INTERVAL_MAX_SHARE of the run. A heuristic: a run with a long walking break can still look like one."""
+    n = len(pts)
+    if n < 120:
+        return []
+    t0 = pts[0]["ts"]
+    t = [(p["ts"] - t0).total_seconds() for p in pts]
+    v = point_speeds(pts)
+    pre = [0.0]
+    for x in v:
+        pre.append(pre[-1] + x)
+    sm = [(pre[min(n, i + 6)] - pre[max(0, i - 5)]) / (min(n, i + 6) - max(0, i - 5)) for i in range(n)]
+    moving = sorted(x for x in sm if x >= INTERVAL_MOVING_MS)
+    if len(moving) < 120:
+        return []
+    lo, hi = moving[int(0.1 * len(moving))], moving[int(0.9 * len(moving))]
+    if hi < INTERVAL_CONTRAST * lo:
+        return []
+    limit = (lo + hi) / 2
+    stretches, i = [], 0
+    while i < n:
+        if sm[i] > limit:
+            j = i
+            while j + 1 < n and sm[j + 1] > limit:
+                j += 1
+            if stretches and t[i] - t[stretches[-1][1]] < INTERVAL_MIN_GAP_S:
+                stretches[-1][1] = j
+            else:
+                stretches.append([i, j])
+            i = j + 1
+        else:
+            i += 1
+    reps = [r for r in stretches if t[r[1]] - t[r[0]] >= INTERVAL_MIN_REP_S]
+    mean_v = lambda a, b: sum(v[a:b + 1]) / (b - a + 1)
+    linked = set()
+    for k in range(len(reps) - 1):
+        (a1, b1), (a2, b2) = reps[k], reps[k + 1]
+        slower = min(mean_v(a1, b1), mean_v(a2, b2))
+        if INTERVAL_MIN_RECOVERY_S <= t[a2] - t[b1] <= INTERVAL_MAX_RECOVERY_S and mean_v(b1, a2) <= INTERVAL_RECOVERY_RATIO * slower:
+            linked.update((k, k + 1))
+    reps = [r for k, r in enumerate(reps) if k in linked]
+    if len(reps) < 2 or sum(t[b] - t[a] for a, b in reps) > INTERVAL_MAX_SHARE * (t[-1] - t[0]):
+        return []
+    out = []
+    for a, b in reps:
+        dur = t[b] - t[a]
+        dist = pts[b]["dist_m"] - pts[a]["dist_m"]
+        hrs = [p["hr"] for p in pts[a:b + 1] if p["hr"] is not None]
+        out.append({"start": t[a], "end": t[b], "dur": dur, "dist": dist, "speed": dist / dur if dur > 0 else None,
+                    "hr": sum(hrs) / len(hrs) if hrs else None, "hr_max": max(hrs) if hrs else None})
+    return out
+
+
 # ─── Sprint detection ─────────────────────────────────────────────────────────
 
 def detect_sprint(splits):
@@ -447,6 +535,16 @@ def compute_tss(dur_s, avg_hr):
     return round((dur_s / 3600) * IF**2 * 100, 1)
 
 
+def tss_from_points(pts):
+    """TSS second by second, for a run whose heart rate is not steady (an interval workout): the square of the intensity factor is averaged
+    over the seconds instead of squaring the average heart rate, which would count the recoveries as if they were as easy as a jog."""
+    total = 0.0
+    for prev, p in zip(pts, pts[1:]):
+        if p["hr"] is not None:
+            total += (p["hr"] / THRESHOLD_HR) ** 2 * min(5.0, max(0.0, (p["ts"] - prev["ts"]).total_seconds()))
+    return round(total / 3600 * 100, 1)
+
+
 def compute_ef(dist_km, dur_s, avg_hr):
     """
     EF = dist_m / (avg_hr × duration_min)   [m/beat proxy]
@@ -492,8 +590,9 @@ def upsert(records, rec):
     leaves empty (weather) keep the previously recorded value."""
     for i, r in enumerate(records):
         if session_key(r) == session_key(rec):
+            blank_on_purpose = {"kind"} | ({"drift_pct", "ef_m_beat"} if rec.get("kind") == "intervals" else set())   # not defined for repetitions
             for k in HISTORY_FIELDS:
-                if rec.get(k) in ("", None):
+                if rec.get(k) in ("", None) and k not in blank_on_purpose:
                     rec[k] = r.get(k, "")
             records[i] = rec
             return records
@@ -557,40 +656,48 @@ def merge_sessions(history, sessions):
 def compute_recommendations(history, session):
     """Next-session advice: {rest, dist_km, pace_s, ef_trend, notes: [(icon, text)]}."""
     hist = sorted(history, key=session_key)
-    recent = hist[-4:]
+    steady = [r for r in hist if r.get("kind") != "intervals"]
+    recent = steady[-4:]
+    interval = session.get("kind") == "intervals"
+    base = steady[-1] if interval and steady else session          # after repetitions the pace and the distance come from the last steady run
 
     ef_vals = [v for v in (safe_float(r.get("ef_m_beat")) for r in recent) if v]
     ef_trend = None
     if len(ef_vals) >= 2:
         ef_trend = "improving" if ef_vals[-1] > ef_vals[0] else "declining"
 
-    drift = safe_float(session.get("drift_pct"))
+    drift = None if interval else safe_float(session.get("drift_pct"))
     tss   = safe_float(session.get("tss")) or 0
-    dist  = safe_float(session.get("dist_km")) or 5.0
-    pace  = session.get("_pace_s") or parse_pace(session.get("pace_minkm")) or 390
+    dist  = safe_float(base.get("dist_km")) or 5.0
+    pace  = base.get("_pace_s") or parse_pace(base.get("pace_minkm")) or 390
 
     rest = 1
+    if interval: rest += 1                 # a hard session: one more day before the next
     if tss > 80:  rest += 1
     if tss > 120: rest += 1
     if drift is not None and drift > DRIFT_HIGH: rest += 1
     rest = min(rest, 4)
 
     dist_rec = dist
-    if ef_trend == "improving" and (drift is None or drift < DRIFT_PROGRESS):
+    if interval:
+        pass                               # no progression after a hard session
+    elif ef_trend == "improving" and (drift is None or drift < DRIFT_PROGRESS):
         dist_rec = round(dist * 1.08, 1)   # +8% load progression
     elif drift is not None and drift > DRIFT_VERY_HIGH:
         dist_rec = round(dist * 0.85, 1)   # recovery run
 
     pace_rec = pace
-    if ef_trend == "improving" and (drift is None or drift < DRIFT_INTENSIFY):
+    if not interval and ef_trend == "improving" and (drift is None or drift < DRIFT_INTENSIFY):
         pace_rec -= 5
 
     notes = []
+    if interval:
+        notes.append(("•", "Last session was an interval workout: one more rest day, then an easy run at the pace and distance of your last steady run"))
     if drift is not None and drift > DRIFT_HIGH:
         notes.append(("⚠", f"High drift ({drift:.1f}%) → accumulated fatigue"))
     elif drift is not None and drift < DRIFT_LOW:
         notes.append(("✓", f"Low drift ({drift:.1f}%) → excellent aerobic form"))
-    return {"rest": rest, "dist_km": dist_rec, "pace_s": pace_rec, "ef_trend": ef_trend, "notes": notes}
+    return {"rest": rest, "dist_km": dist_rec, "pace_s": pace_rec, "base_pace_s": pace, "ef_trend": ef_trend, "notes": notes}
 
 
 # ─── Single-file analysis ─────────────────────────────────────────────────────
@@ -633,7 +740,7 @@ def concat_runs(parts, gap_s=1):
 
 
 def analyze_file(filepath, fetch=None):
-    """Analyse one CSV (plus the CSVs merged into it, see merged_members). Returns {session, splits, is_sprint, sprint_idx, alt_min, alt_max, avg_hr, weather,
+    """Analyse one CSV (plus the CSVs merged into it, see merged_members). Returns {session, reps (the repetitions of an interval workout, else []), splits, is_sprint, sprint_idx, alt_min, alt_max, avg_hr, weather,
     start, dur_s, total_km, pace_s, ef, drift, tss, points}; raises ValueError(message) if unusable."""
     if fetch is None:
         fetch = FETCH_WEATHER
@@ -654,13 +761,14 @@ def analyze_file(filepath, fetch=None):
     alt_min, alt_max = (min(alts), max(alts)) if alts else (None, None)
     splits   = km_splits(pts)
 
-    is_sprint, sprint_idx = detect_sprint(splits)
+    reps = detect_intervals(pts)          # an interval workout has no steady heart rate: no drift, no efficiency, a TSS second by second
+    is_sprint, sprint_idx = (False, None) if reps else detect_sprint(splits)
     sprint_tail_s = int(splits[sprint_idx]["dur_s"]) if is_sprint and sprint_idx is not None else 0
 
-    drift  = cardiac_drift(pts, exclude_tail_s=sprint_tail_s)
+    drift  = None if reps else cardiac_drift(pts, exclude_tail_s=sprint_tail_s)
     pace_s = dur_s / total_km
-    tss    = compute_tss(dur_s, avg_hr)
-    ef     = compute_ef(total_km, dur_s, avg_hr)
+    tss    = tss_from_points(pts) if reps else compute_tss(dur_s, avg_hr)
+    ef     = None if reps else compute_ef(total_km, dur_s, avg_hr)
 
     first_gps_pt = next((p for p in pts if p.get("lat") and p.get("lon")), None)
     weather = fetch_weather(first_gps_pt["lat"], first_gps_pt["lon"], start_ts) if first_gps_pt and fetch else None
@@ -679,8 +787,9 @@ def analyze_file(filepath, fetch=None):
         "temp_c":       weather["temp_c"]      if weather else "",
         "humidity_pct":  weather["humidity_pct"] if weather else "",
         "wind_kmh":    weather["wind_kmh"]   if weather else "",
+        "kind":         "intervals" if reps else "",
     }
-    return {"session": session, "splits": splits, "is_sprint": is_sprint, "sprint_idx": sprint_idx,
+    return {"session": session, "reps": reps, "splits": splits, "is_sprint": is_sprint, "sprint_idx": sprint_idx,
             "alt_min": alt_min, "alt_max": alt_max, "avg_hr": avg_hr, "weather": weather, "start": start_ts, "dur_s": dur_s,
             "total_km": total_km, "pace_s": pace_s, "ef": ef, "drift": drift, "tss": tss, "points": pts}
 

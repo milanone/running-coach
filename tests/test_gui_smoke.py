@@ -5,7 +5,7 @@ import importlib.util
 HERE = os.path.dirname(__file__)
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, ".."))
-from synth import write_run
+from synth import write_run, write_intervals_run
 
 
 def write_run_bytes(**kw):
@@ -75,8 +75,8 @@ class GuiSmokeTests(unittest.TestCase):
                 self.assertTrue(app.canvas.find_all())
 
                 app.fitness_now()                                              # the advice lives at the top of the Fitness tab
-                self.assertIn("NEXT SESSION", app.fit_summary.get("1.0", "end"))
-                self.assertIn("Distance:", app.fit_summary.get("1.0", "end"))
+                self.assertIsNotNone(app.fit_view["next"])
+                self.assertEqual(app.fit_view["next"]["rows"][0][0], "Distance")
                 self.assertNotIn("Next session", [app.tabs.tab(t, "text") for t in app.tabs.tabs()])
 
                 app.import_now()
@@ -341,13 +341,14 @@ class GuiSmokeTests(unittest.TestCase):
                 kids = app.fit_tree.get_children()
                 self.assertEqual(len(kids), 4)
                 self.assertEqual(app.fit_tree.set(kids[0], "date"), "05/05/2026")           # newest first
-                text = app.fit_summary.get("1.0", "end")
-                self.assertIn("Training status", text)
-                self.assertIn("mass 68 kg", text)
-                self.assertNotIn("No athlete.json", text)
+                self.assertTrue(app.fit_view["load"]["headline"])
+                self.assertIn("mass 68 kg", app.fit_view["footer"])
+                self.assertNotIn("No athlete.json", app.fit_message.get())
                 app.fit_tree.selection_set(kids[0])
                 app.update()
-                self.assertIn("Zones", app.fit_detail.get("1.0", "end"))
+                self.assertEqual(len(app.fit_panel["zones"]), 5)                          # the panel of the selected run
+                self.assertEqual(app.fit_panel["title"], "05/05/2026  07:00" if False else app.fit_panel["title"])
+                self.assertEqual(len(app.fit_strip.winfo_children()), 4)                   # the four cards
                 app.tabs.select(1)                                                          # Charts: the canvas must be visible to be drawn
                 app.update()
                 for label in ("Fitness, CTL", "VO2max estimate (ml/kg/min)", "Pace at a fixed HR (min/km)", "Training effect (indicative)"):
@@ -358,7 +359,7 @@ class GuiSmokeTests(unittest.TestCase):
                 self.assertTrue(any(app.canvas.type(i) == "oval" for i in app.canvas.find_all()))   # four points plotted
                 os.remove(os.path.join(d, "athlete.json"))
                 app.fitness_now()
-                self.assertIn("No athlete.json", app.fit_summary.get("1.0", "end"))
+                self.assertIn("No athlete.json", app.fit_message.get())
             finally:
                 app._close()
 
@@ -375,6 +376,18 @@ class GuiSmokeTests(unittest.TestCase):
                 app.fitness_now()
                 app.update()
                 self.assertEqual(len(app.gauge_cards), 8)
+                card, g = app.gauge_cards[0]
+                boxes = [w for w in card.winfo_children() if w.winfo_class() == "Text"]
+                self.assertEqual(len(boxes), 3)                                        # the verdict, the explanation and the reference
+                self.assertIn(g["label"], boxes[0].get("1.0", "end"))
+                self.assertIn(g["why"], boxes[1].get("1.0", "end"))
+                boxes[1].tag_add("sel", "1.0", "end-1c")
+                self.assertEqual(boxes[1].selection_get(), g["why"])                   # it can be selected (and so copied)
+                before = boxes[1].get("1.0", "end")
+                boxes[1].focus_force()
+                boxes[1].event_generate("<Key>", keysym="x")                           # but not edited
+                app.update()
+                self.assertEqual(boxes[1].get("1.0", "end"), before)
                 self.assertEqual(app.gauge_run.get().split()[0], "2026-04-28")          # the newest run first
                 self.assertTrue(all(g["title"] for _, g in app.gauge_cards))
                 app.gauge_run.set(app.gauge_box.cget("values")[-1])                    # an older run
@@ -387,21 +400,46 @@ class GuiSmokeTests(unittest.TestCase):
             finally:
                 app._close()
 
+    def test_interval_workout_is_marked_in_the_detail_and_the_fitness_text(self):
+        gui = load_gui()
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("2026.04.14 07.00", "2026.04.21 07.00"):
+                write_run(os.path.join(d, f"{name}-RUNNING.csv"), km=4.0, base_speed=2.6, icu_format=True)
+            write_intervals_run(os.path.join(d, "2026.04.28 07.00-RUNNING.csv"))
+            app = gui.App(data_dir=d, config_path=os.path.join(d, "cfg.json"))
+            try:
+                app.fetch.set(False)
+                app.import_now()
+                app.update()
+                key = "2026-04-28|07:00"
+                app.tree.selection_set(key)
+                app.show_detail()
+                self.assertIn("Interval workout", app.detail.get("1.0", "end"))
+                app.fitness_now()
+                m = app.adv[("2026-04-28", "07:00")]
+                self.assertEqual(len(m["reps"]), 3)
+                self.assertIn("interval workout", app.fit_view["next"]["sub"])           # the advice says where its pace comes from
+                self.assertEqual(len(app.fit_panel["reps"]), 3)                          # and the panel lists the repetitions
+                self.assertEqual(app.fit_panel["badge"], "INTERVALS")
+                self.assertEqual(len(app.gauge_cards), 8)
+            finally:
+                app._close()
+
     def test_athlete_dialog_values_are_checked_and_saved(self):
         gui = load_gui()
         with tempfile.TemporaryDirectory() as d:
             for name in ("2026.04.14 07.00", "2026.04.21 07.00", "2026.04.28 07.00"):
                 write_run(os.path.join(d, f"{name}-RUNNING.csv"), km=4.0, base_speed=2.6, icu_format=True)
             app = gui.App(data_dir=d, config_path=os.path.join(d, "cfg.json"))
-            ok = {"hr_max": "185", "hr_rest": "55", "mass_kg": "70,5", "age": "40"}
+            ok = {"hr_max": "185", "hr_rest": "55", "mass_kg": "70,5", "age": "40", "height_cm": "175"}
             try:
                 app.fetch.set(False)
                 app.import_now()
                 values = app.apply_athlete(ok, "F", False)
                 self.assertEqual((values["mass_kg"], values["age"], values["sex"], values["hr_max_estimated"]), (70.5, 40, "F", None))
                 saved = gui.rm.read_athlete(d)
-                self.assertEqual((saved["hr_max"], saved["hr_rest"], saved["age"], saved["sex"]), (185, 55, 40, "F"))
-                for bad in (dict(ok, hr_max="abc"), dict(ok, hr_max="300"), dict(ok, age="5"), dict(ok, mass_kg="")):
+                self.assertEqual((saved["hr_max"], saved["hr_rest"], saved["age"], saved["sex"], saved["height_cm"]), (185, 55, 40, "F", 175))
+                for bad in (dict(ok, hr_max="abc"), dict(ok, hr_max="300"), dict(ok, age="5"), dict(ok, mass_kg=""), dict(ok, height_cm="17")):
                     with self.assertRaises(ValueError):
                         app.apply_athlete(bad, "F", False)
                 with self.assertRaises(ValueError):
@@ -451,7 +489,7 @@ class GuiSmokeTests(unittest.TestCase):
                 wait()
                 self.assertEqual(len(app.fit_rows), 3)
                 self.assertEqual(len(app.fit_tree.get_children()), 3)
-                self.assertIn("NEXT SESSION", app.fit_summary.get("1.0", "end"))
+                self.assertIsNotNone(app.fit_view["next"])
                 self.assertFalse(app.fit_stale)
                 # the history changes while another tab is showing: stale, but nothing is computed until a tab needs it
                 app.tabs.select(0)

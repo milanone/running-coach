@@ -27,3 +27,19 @@ def write_run(path, km=6.0, base_speed=2.5, sprint=False, gps_lockup_s=20, hr_st
             rows.append(f"{ts},{lat if gps else ''},{lon if gps else ''},{alt},{dist},{hr:.0f}")
     with open(path, "w") as f:
         f.write("\n".join(rows))
+
+
+def write_intervals_run(path, reps=3, fast=3.3, slow=1.5, warm_s=300, rep_s=180, rest_s=150, cool_s=120):
+    """A synthetic interval workout (intervals.icu-style CSV): a jog, `reps` fast repetitions with a slow recovery after each, a cool-down.
+    The heart rate climbs during a repetition and falls during the recovery."""
+    plan = [(warm_s, 2.0)] + [(rep_s, fast), (rest_s, slow)] * reps + [(cool_s, slow)]
+    rows = ["time,cadence,heartrate,distance,altitude,lat,lng,velocity_smooth,fixed_altitude"]
+    d, t, hr = 0.0, 0, 110.0
+    for secs, v in plan:
+        for _ in range(secs):
+            hr += (172 - hr) * 0.02 if v == fast else (118 - hr) * 0.03 if v == slow else (135 - hr) * 0.05
+            d += v
+            t += 1
+            rows.append(f"{t},0,{hr:.0f},{d},,,,{v},")
+    with open(path, "w") as f:
+        f.write("\n".join(rows))

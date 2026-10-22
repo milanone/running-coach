@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 import parse_run_csv as P
 import run_metrics as R
-from synth import write_run
+from synth import write_run, write_intervals_run
 
 ATHLETE = dict(R.DEFAULT_ATHLETE, hr_max=190, hr_rest=60, mass_kg=70)
 
@@ -156,6 +156,161 @@ class RunMetricsTests(unittest.TestCase):
         label, _ = R.training_status(R.training_load(spike, today=d0 + timedelta(weeks=5, days=5)))
         self.assertEqual(label, "Overreaching")                            # ratio ~3.3, past the 2.0 of Garmin's "very high"
 
+    def test_interval_workout_metrics(self):
+        plan = [(300, 2.0, 130), (180, 3.3, lambda k: 150 + k / 9), (150, 1.5, lambda k: 170 - k * 0.5), (180, 3.3, lambda k: 150 + k / 9),
+                (150, 1.5, lambda k: 170 - k * 0.5), (180, 3.3, lambda k: 152 + k / 9), (150, 1.5, 100)]
+        pts = make_pts(plan)
+        m = R.run_metrics(pts, ATHLETE)
+        self.assertEqual(len(m["reps"]), 3)
+        self.assertAlmostEqual(m["reps"][0]["pace"], 1000 / 3.3, delta=6)
+        self.assertGreater(m["reps"][0]["hr"], 150)
+        self.assertAlmostEqual(m["reps"][0]["drop60"], 30, delta=6)                         # 170 -> 140 in the first minute of the recovery
+        self.assertGreater(m["reps"][2]["drop60"], 25)
+        drops = [r["drop60"] for r in m["reps"]]
+        self.assertAlmostEqual(m["hrr60"], sum(drops) / 3, places=6)                        # the recovery of the run is the mean of the three
+        self.assertEqual(m["hrr60_n"], 3)
+        for key in ("vo2max", "pace_at_hr", "ef_window", "hr_rise_s", "split_balance_pct", "pace_cv_pct"):
+            self.assertIsNone(m[key], key)                                                  # these need a steady effort
+        self.assertEqual(m["efforts"], [])
+        self.assertGreater(m["trimp"], 0)                                                   # the zones still count
+        text = "\n".join(R.run_lines(dict(m, perf_pct=None)))
+        self.assertIn("INTERVAL WORKOUT: 3 repetitions", text)
+        self.assertIn("Rep 3 at", text)
+        self.assertIn("First to last", text)
+        # the gauges say so instead of judging the drift and the condition, and the intensity counts the repetitions only
+        summ = {"load": None, "status": ("", ""), "athlete": ATHLETE}
+        g = {x["key"]: x for x in R.gauges(dict(m, perf_pct=None), {"drift_pct": "-20", "avg_hr_bpm": "130"}, summ)}
+        self.assertIsNone(g["drift"]["value"])
+        self.assertIn("interval workout", g["drift"]["advice"])
+        self.assertIsNone(g["condition"]["value"])
+        self.assertIn("at least 3 earlier interval workouts", g["condition"]["advice"])    # and says what it would need
+        self.assertAlmostEqual(g["hrr"]["value"], m["hrr60"])                                # the recovery after the repetitions is a real one
+        self.assertIn("recoveries after a repetition", g["hrr"]["advice"])
+        self.assertGreater(g["intensity"]["value"], 130 / 190 * 100 + 5)                    # the repetitions are harder than the average of the run
+        self.assertIn("repetitions only", g["intensity"]["advice"])
+        # a steady run has no repetitions
+        self.assertEqual(R.run_metrics(make_pts([(1200, 3.0, 140)]), ATHLETE)["reps"], [])
+
+    def test_performance_condition_of_interval_workouts_compares_the_repetitions(self):
+        with tempfile.TemporaryDirectory() as d:
+            for k, fast in enumerate((3.3, 3.3, 3.3, 3.3, 3.6)):                            # the last one is faster at the same heart rate
+                write_intervals_run(os.path.join(d, f"2026.05.0{k + 1} 07.00-RUNNING.csv"), fast=fast)
+            res = P.import_sessions(d, fetch=False)
+            history = P.merge_sessions(res["history"], res["sessions"])
+            rows = R.compute_all(d, history, ATHLETE)
+            self.assertEqual([m["perf_n"] for m in rows], [0, 1, 2, 3, 4])
+            self.assertEqual([m["perf_pct"] is None for m in rows], [True, True, True, False, False])
+            self.assertAlmostEqual(rows[3]["perf_pct"], 0.0, delta=1.0)                      # the same workout as before
+            self.assertGreater(rows[4]["perf_pct"], 5.0)                                     # more distance per heartbeat
+            self.assertIn("against your earlier interval workouts", "\n".join(R.run_lines(rows[4])))
+            self.assertIn("needs at least 3", "\n".join(R.run_lines(rows[1])))
+
+    def test_heart_rate_at_a_speed_from_the_table_of_a_run(self):
+        S = R.series(make_pts([(700, 2.0, 120), (1200, 3.0, 138), (600, 3.6, 150)]))
+        table = R.hr_speed_table(S)
+        self.assertEqual(R.hr_at_speed_from_table(table, 3.0), 138)
+        self.assertAlmostEqual(R.hr_at_speed_from_table(table, 3.0), R.hr_at_speed(S, 3.0), delta=1.0)
+        self.assertIsNone(R.hr_at_speed_from_table(table, 5.0))                           # no seconds near that speed
+        self.assertIsNone(R.hr_at_speed_from_table({}, 3.0))
+        self.assertIsNone(R.hr_at_speed_from_table(table, None))
+        again = json.loads(json.dumps(table))                                             # what the cache file gives back
+        self.assertEqual(R.hr_at_speed_from_table(again, 3.0), 138)
+
+    def test_the_cache_is_not_thrown_away_by_a_new_run_or_a_merge(self):
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as d:
+            for k in range(4):
+                write_run(os.path.join(d, f"2026.05.0{k + 1} 07.00-RUNNING.csv"), km=4.0 + k, base_speed=2.5 + 0.1 * k, icu_format=True)
+            res = P.import_sessions(d, fetch=False)
+            history = P.merge_sessions(res["history"], res["sessions"])
+            with mock.patch.object(R, "run_metrics", wraps=R.run_metrics) as spy:
+                R.compute_all(d, history, ATHLETE)
+                self.assertEqual(spy.call_count, 4)                                         # the first time: every run
+                spy.reset_mock()
+                R.compute_all(d, history, ATHLETE)
+                self.assertEqual(spy.call_count, 0)                                         # then none
+                new = dict(history[-1], date="09/05/2026", pace_minkm="04:00")             # a faster run joins: the median pace moves
+                R.compute_all(d, history + [new], ATHLETE)
+                self.assertEqual(spy.call_count, 0)
+                with open(os.path.join(d, P.MERGE_FILE), "w") as f:                          # a merge elsewhere in the history
+                    f.write("{}")
+                R.compute_all(d, history, ATHLETE)
+                self.assertEqual(spy.call_count, 0)
+                R.compute_all(d, history, dict(ATHLETE, hr_max=180))                         # but another maximum heart rate changes every run
+                self.assertEqual(spy.call_count, 4)
+                spy.reset_mock()
+                R.compute_all(d, history, dict(ATHLETE, hr_max=180, age=50, sex="M"))      # age and sex do not
+                self.assertEqual(spy.call_count, 0)
+                path = os.path.join(d, "2026.05.02 07.00-RUNNING.csv")
+                os.utime(path, (os.path.getmtime(path) + 5, os.path.getmtime(path) + 5))      # one file changes: only that run
+                R.compute_all(d, history, dict(ATHLETE, hr_max=180))
+                self.assertEqual(spy.call_count, 1)
+
+    def test_dashboard_and_run_panel_are_plain_data(self):
+        with tempfile.TemporaryDirectory() as d:
+            for k, name in enumerate(("2026.05.04 07.00", "2026.05.07 07.00", "2026.05.11 07.00", "2026.05.14 07.00")):
+                write_run(os.path.join(d, f"{name}-RUNNING.csv"), km=4.0 + k, base_speed=2.5 + 0.05 * k, icu_format=True)
+            write_intervals_run(os.path.join(d, "2026.05.18 07.00-RUNNING.csv"))
+            res = P.import_sessions(d, fetch=False)
+            history = P.merge_sessions(res["history"], res["sessions"])
+            rows = R.compute_all(d, history, ATHLETE)
+            summ = R.summary(rows, history, ATHLETE, today=date(2026, 5, 19))
+            adv = R.next_session(history, rows, summ, today=date(2026, 5, 19))
+            dash = R.dashboard(adv, summ)
+            self.assertEqual(dash["next"]["rows"][0][0], "Distance")
+            self.assertTrue(dash["next"]["headline"].startswith("Ready"))
+            self.assertIn("interval workout", dash["next"]["sub"])                         # the last session was the workout
+            self.assertEqual(dash["load"]["headline"], summ["status"][0])
+            self.assertIn(dash["load"]["tone"], ("good", "ok", "info", "warn", "bad"))
+            self.assertEqual([r[0] for r in dash["load"]["rows"]], ["Load ratio", "Fitness (CTL)", "Fatigue (ATL)", "Form (TSB)", "Load, last 7 days"])
+            self.assertIn("mass 70 kg", dash["footer"])
+            if "vdot_races" in summ:
+                self.assertEqual([r[0] for r in dash["races"]["rows"]], ["5 km", "10 km", "Half marathon", "Marathon"])
+            for label, secs, day in dash["best"]:
+                self.assertRegex(secs, r"^\d+:\d\d")
+                self.assertRegex(day, r"^\d\d/\d\d$")
+            panel = R.run_panel(rows[-1])                                                  # the interval workout
+            self.assertEqual((panel["badge"], len(panel["tiles"]), len(panel["zones"])), ("INTERVALS", 11, 5))
+            self.assertEqual(len(panel["reps"]), 3)
+            self.assertEqual(panel["title"], "18/05/2026  07:00")
+            self.assertTrue(any("repetitions" in text for _, text in panel["notes"]))
+            steady = R.run_panel(rows[0])
+            self.assertEqual((steady["badge"], steady["reps"]), ("", []))
+            self.assertAlmostEqual(sum(steady["zones"]), rows[0]["elapsed_s"] / 60.0, delta=rows[0]["elapsed_s"] / 60.0 * 0.3 + 1)
+            empty = R.dashboard(None, None)
+            self.assertEqual((empty["next"], empty["load"], empty["vo2"], empty["races"], empty["best"]), (None, None, None, None, []))
+
+    def test_heart_rate_recovery_limits_depend_on_age_and_resting_heart_rate(self):
+        self.assertEqual(R.hrr_limits({"age": None, "hr_rest": 60}), (12.0, 18.0))           # no age: the two limits of the literature
+        walking, lying = R.hrr_limits({"age": 55, "hr_rest": 60})
+        self.assertEqual(walking, 12.0)
+        self.assertAlmostEqual(lying, 36.4 + 14.3 - 15.4275 - 11.4, places=3)                # Table 1 of Jou et al., 5th percentile
+        self.assertLess(R.hrr_limits({"age": 70, "hr_rest": 60})[1], lying)                   # the limit falls with age
+        self.assertLess(R.hrr_limits({"age": 55, "hr_rest": 80})[1], lying)                   # and with a higher resting heart rate
+        self.assertEqual(R.hrr_limits({"age": 120, "hr_rest": 60}), R.hrr_limits({"age": 85, "hr_rest": 60}))   # clamped to the ages of the study
+        self.assertEqual(R.hrr_limits({"age": 85, "hr_rest": 90})[1], 12.0)                   # never below the limit with a cool-down
+        summ = {"load": None, "status": ("", ""), "athlete": dict(ATHLETE, age=55)}           # limits 12 and about 21
+        label = lambda v: {x["key"]: x for x in R.gauges({"hrr60": v}, {}, summ)}["hrr"]["label"]
+        self.assertEqual((label(9.0), label(15.0), label(43.0)), ("Below the normal range", "Borderline", "Normal range"))
+        g = {x["key"]: x for x in R.gauges({"hrr60": 43.0}, {}, summ)}["hrr"]
+        self.assertIn("lying down", g["why"])
+        self.assertIn("zwae308", g["source"])
+        self.assertEqual([b[3] for b in g["bands"]], ["Below the normal range", "Borderline", "Normal range"])
+        # the median needs the height (and mass): 69.1 - 0.0033*55^2 - 0.21*60 - 0.34*BMI, BMI = 70 / 1.75^2
+        self.assertIsNone(R.hrr_median({"age": 55, "hr_rest": 60, "mass_kg": 70, "height_cm": None}))
+        self.assertIsNone(R.hrr_median({"age": None, "hr_rest": 60, "mass_kg": 70, "height_cm": 175}))
+        median = R.hrr_median({"age": 55, "hr_rest": 60, "mass_kg": 70, "height_cm": 175})
+        self.assertAlmostEqual(median, 69.1 - 0.0033 * 55 * 55 - 12.6 - 0.34 * 70 / 1.75 ** 2, places=3)
+        tall = dict(summ, athlete=dict(ATHLETE, age=55, mass_kg=70, height_cm=175))
+        label_t = lambda v: {x["key"]: x for x in R.gauges({"hrr60": v}, {}, tall)}["hrr"]["label"]
+        self.assertEqual((label_t(15.0), label_t(30.0), label_t(median + 3)), ("Borderline", "Normal range", "Above the median"))
+        gt = {x["key"]: x for x in R.gauges({"hrr60": 30.0}, {}, tall)}["hrr"]
+        self.assertEqual(len(gt["bands"]), 4)
+        self.assertIn("median", gt["why"])
+        self.assertEqual(len({x["key"]: x for x in R.gauges({"hrr60": 30.0}, {}, summ)}["hrr"]["bands"]), 3)   # without a height: no median
+        old = dict(summ, athlete=dict(ATHLETE, age=85, hr_rest=90))                           # limits coincide: two bands
+        self.assertEqual(len({x["key"]: x for x in R.gauges({"hrr60": 5.0}, {}, old)}["hrr"]["bands"]), 2)
+
     def test_gauges_pick_the_band_of_each_value(self):
         load = {"acute": 150.0, "chronic": 100.0, "tsb": -12.0}
         summ = {"load": load, "status": ("Productive", ""), "athlete": ATHLETE}
@@ -170,7 +325,8 @@ class RunMetricsTests(unittest.TestCase):
         self.assertEqual(g["intensity"]["label"], "Zone 3")
         self.assertEqual(g["te"]["label"], "Improving")
         self.assertEqual(g["condition"]["label"], "Below usual")
-        self.assertEqual((g["hrr"]["label"], g["hrr"]["tone"]), ("Slow", "bad"))
+        self.assertEqual((g["hrr"]["label"], g["hrr"]["tone"]), ("Below the normal range", "bad"))       # 9 bpm: under Cole's 12 (no age given)
+        self.assertIn("12 bpm", g["hrr"]["why"])
         for x in g.values():                                                             # every gauge says where its range comes from
             self.assertIn(x["level"], ("sourced", "secondary", "mine"))
             self.assertTrue(x["why"] and x["source"])
@@ -251,6 +407,10 @@ class RunMetricsTests(unittest.TestCase):
                 json.dump({"age": "old", "sex": "x", "hr_max": 180, "colour": "red"}, f)
             a = R.read_athlete(d)
             self.assertEqual((a["age"], a["sex"], a["hr_max"]), (None, None, 180))         # a bad age or sex is ignored, not fatal
+            R.write_athlete(d, {"height_cm": 175, "age": 40})
+            self.assertEqual(R.read_athlete(d)["height_cm"], 175)
+            R.write_athlete(d, {"height_cm": 17})                                              # an impossible height is ignored, not fatal
+            self.assertIsNone(R.read_athlete(d)["height_cm"])
             R.write_athlete(d, {"sex": "m"})
             self.assertEqual(R.read_athlete(d)["sex"], "M")
             self.assertEqual(json.load(open(os.path.join(d, R.ATHLETE_FILE)))["colour"], "red")   # an unknown key survives a rewrite
