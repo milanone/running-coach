@@ -962,7 +962,7 @@ def gauges(m, session, summ):
     return [
         _gauge("load_ratio", "Load ratio (now)", ratio, f"{ratio:.2f}" if ratio is not None else "-", 0.0, 3.0, LOAD_RATIO_BANDS,
                "The training load of the last 7 days divided by the weekly average of the last 28 days. It says whether you are asking the body "
-               "for more than it is used to. Needs about four weeks of history. Shown for today, not for the run chosen above.",
+               "for more than it is used to. Needs about four weeks of history. Shown for today.",
                "Garmin manual, Training Status (load ratio table); the bands are joined at 1.4 and 2.0.", "sourced", low_base),
         _gauge("form", "Form, TSB (now)", load["tsb"] if load else None, f"{load['tsb']:+.0f}" if load else "-", -40, 40, FORM_BANDS,
                "Fitness (the 42-day average of the load) minus fatigue (the 7-day average). Negative means more tired than trained for, "
@@ -1061,51 +1061,72 @@ def dashboard(adv, summ):
     return out
 
 
-def run_panel(m):
-    """What the panel of one run shows: {title, subtitle, badge, tiles [(label, value)], zones (minutes in Z1-Z5), reps [rows], notes, warning}."""
+def run_panel(m, row=None, details=None):
+    """What the summary of one run shows. `m`: the metrics of the run (compute_all's row), or None while they are being computed; `row`: its history
+    row (the facts: duration, pace, heart rate, TSS, EF, drift, weather); `details`: {"alt": (min, max), "notes": [(icon, text)]} from reading the
+    CSV (the altitude, a merge, a sprint, the weather warnings). Returns {title, subtitle, badge, facts [(label, value)], tiles [(label, value)],
+    zones (minutes in Z1-Z5), reps [rows], notes, warning, has_metrics}."""
+    details = details or {}
     dash = lambda v, f: "-" if v is None else f(v)
-    tiles = [("Training effect*", f"{m['te']:.1f}"), ("TRIMP", f"{m['trimp']:.0f}"), ("Recovery time*", f"{m['recovery_h']:.0f} h"),
-             ("VO2max", dash(m["vo2max"], lambda v: f"{v:.1f}")),
-             (f"Pace at {m['hr_ref']:.0f} bpm", dash(m["pace_at_hr"], lambda v: core.format_pace(v) + " /km")),
-             ("HR at the usual speed", dash(m["hr_at_speed"], lambda v: f"{v:.0f} bpm")),
-             ("Cadence", dash(m["spm"], lambda v: f"{v:.0f} /min")), ("Step length", dash(m["step_m"], lambda v: f"{v:.2f} m")),
-             ("Power*", dash(m["power_w"], lambda v: f"{v:.0f} W")),
-             ("HR recovery, 60 s", dash(m["hrr60"], lambda v: f"{v:.0f} bpm")),
-             ("Performance condition", dash(m.get("perf_pct"), lambda v: f"{v:+.1f} %"))]
-    reps = [(i, fmt_time(r["start"]), fmt_time(r["dur"]), f"{r['dist']:.0f}", core.format_pace(r["pace"]) if r["pace"] else "-",
-             f"{r['hr']:.0f}" if r["hr"] else "-", f"{r['hr_max']:.0f}" if r["hr_max"] else "-", "-" if r["drop60"] is None else f"{r['drop60']:.0f}")
-            for i, r in enumerate(m.get("reps") or [], 1)]
-    notes = []
-    if m["moving_s"]:
-        notes.append(("•", f"Moving time {fmt_time(m['moving_s'])} of {fmt_time(m['elapsed_s'])}."))
-    if m.get("reps"):
-        work = sum(r["dur"] for r in m["reps"])
-        notes.append(("•", f"{len(m['reps'])} repetitions, {fmt_time(work)} of work ({work / m['elapsed_s'] * 100:.0f}% of the run). VO2max, pace at a heart rate, "
-                                "efficiency and drift need a steady effort and are not computed."))
-        first, last = m["reps"][0], m["reps"][-1]
-        if len(m["reps"]) >= 2 and first["pace"] and last["pace"] and first["hr"] and last["hr"]:
-            notes.append(("•", f"First to last repetition: pace {last['pace'] - first['pace']:+.0f} s/km, heart rate {last['hr'] - first['hr']:+.0f} bpm."))
-        if m.get("hrr60_n"):
-            notes.append(("•", f"Heart-rate recovery: mean of the {m['hrr60_n']} recoveries after a repetition, from the peak."))
-        if m.get("perf_pct") is None:
-            notes.append(("•", f"Performance condition needs at least 3 earlier interval workouts to compare with ({m.get('perf_n', 0)} so far)."))
-    if m.get("split_balance_pct") is not None:
-        notes.append(("•", f"Second half {m['split_balance_pct']:+.1f}% vs the first" +
-                      (f", km times vary {m['pace_cv_pct']:.1f}%." if m.get("pace_cv_pct") is not None else ".")))
-    if m.get("hr_rise_s") is not None:
-        notes.append(("•", f"Heart-rate rise time (63%): {m['hr_rise_s']:.0f} s."))
-    if m.get("best"):
-        notes.append(("•", "Best in this run: " + ", ".join(f"{k} {fmt_time(v[0])}" for k, v in m["best"].items()) + "."))
-    for e in m.get("efforts") or []:
-        notes.append(("•", f"Effort at {fmt_time(e['start'])}: {fmt_time(e['dur'])}, {e['dist']:.0f} m" + (f", {core.format_pace(e['pace'])}/km" if e["pace"] else "")
-                      + (f", HR {e['hr']:.0f}" if e["hr"] else "")))
-    warning = ""
-    if m.get("hr_clipped_s"):
-        warning = (f"⚠ The heart rate sits at its maximum for {m['hr_clipped_s']} s: a clipped recording, left out of the metrics (zones, TRIMP and training "
-                   "effect are a minimum). Point the Health Sync folder at the FIT files to get the real values.")
-    d = m["date"]
-    return {"title": f"{d[8:]}/{d[5:7]}/{d[:4]}  {m['time']}", "subtitle": f"{m['dist_km'] or 0:.2f} km", "badge": "INTERVALS" if m.get("reps") else "",
-            "tiles": tiles, "zones": [m["zone_s"][i] / 60.0 for i in range(1, 6)], "reps": reps, "notes": notes, "warning": warning}
+    notes = list(details.get("notes") or [])
+    facts = []
+    if row:
+        temp, hum, wind = (core.safe_float(row.get(k)) for k in ("temp_c", "humidity_pct", "wind_kmh"))
+        weather = "-" if temp is None else f"{temp:g} \u00b0C" + (f", {hum:g}%" if hum is not None else "") + (f", {wind:g} km/h" if wind is not None else "")
+        alt = details.get("alt")
+        facts = [("Duration", row.get("duration_hms") or "-"), ("Pace", f"{row['pace_minkm']} /km" if row.get("pace_minkm") else "-"),
+                 ("Average HR", f"{row['avg_hr_bpm']} bpm" if row.get("avg_hr_bpm") else "-"), ("TSS", row.get("tss") or "-"),
+                 ("EF", row.get("ef_m_beat") or "-"), ("Drift", f"{row['drift_pct']} %" if row.get("drift_pct") not in ("", None) else "-"),
+                 ("Weather", weather), ("Altitude", f"{alt[0]:.0f} to {alt[1]:.0f} m" if alt else "-")]
+    tiles, zones, reps, warning, badge = [], [0.0] * 5, [], "", ""
+    if m:
+        tiles = [("Training effect*", f"{m['te']:.1f}"), ("TRIMP", f"{m['trimp']:.0f}"), ("Recovery time*", f"{m['recovery_h']:.0f} h"),
+                 ("VO2max", dash(m["vo2max"], lambda v: f"{v:.1f}")),
+                 (f"Pace at {m['hr_ref']:.0f} bpm", dash(m["pace_at_hr"], lambda v: core.format_pace(v) + " /km")),
+                 ("HR at the usual speed", dash(m["hr_at_speed"], lambda v: f"{v:.0f} bpm")),
+                 ("Cadence", dash(m["spm"], lambda v: f"{v:.0f} /min")), ("Step length", dash(m["step_m"], lambda v: f"{v:.2f} m")),
+                 ("Power*", dash(m["power_w"], lambda v: f"{v:.0f} W")),
+                 ("HR recovery, 60 s", dash(m["hrr60"], lambda v: f"{v:.0f} bpm")),
+                 ("Performance condition", dash(m.get("perf_pct"), lambda v: f"{v:+.1f} %"))]
+        zones = [m["zone_s"][k] / 60.0 for k in range(1, 6)]
+        reps = [(k, fmt_time(r["start"]), fmt_time(r["dur"]), f"{r['dist']:.0f}", core.format_pace(r["pace"]) if r["pace"] else "-",
+                 f"{r['hr']:.0f}" if r["hr"] else "-", f"{r['hr_max']:.0f}" if r["hr_max"] else "-", "-" if r["drop60"] is None else f"{r['drop60']:.0f}")
+                for k, r in enumerate(m.get("reps") or [], 1)]
+        badge = "INTERVALS" if m.get("reps") else ""
+        if m["moving_s"]:
+            notes.append(("\u2022", f"Moving time {fmt_time(m['moving_s'])} of {fmt_time(m['elapsed_s'])}."))
+        if m.get("reps"):
+            work = sum(r["dur"] for r in m["reps"])
+            notes.append(("\u2022", f"{len(m['reps'])} repetitions, {fmt_time(work)} of work ({work / m['elapsed_s'] * 100:.0f}% of the run). VO2max, pace at a heart rate, "
+                                    "efficiency and drift need a steady effort and are not computed."))
+            first, last = m["reps"][0], m["reps"][-1]
+            if len(m["reps"]) >= 2 and first["pace"] and last["pace"] and first["hr"] and last["hr"]:
+                notes.append(("\u2022", f"First to last repetition: pace {last['pace'] - first['pace']:+.0f} s/km, heart rate {last['hr'] - first['hr']:+.0f} bpm."))
+            if m.get("hrr60_n"):
+                notes.append(("\u2022", f"Heart-rate recovery: mean of the {m['hrr60_n']} recoveries after a repetition, from the peak."))
+            if m.get("perf_pct") is None:
+                notes.append(("\u2022", f"Performance condition needs at least 3 earlier interval workouts to compare with ({m.get('perf_n', 0)} so far)."))
+        if m.get("split_balance_pct") is not None:
+            notes.append(("\u2022", f"Second half {m['split_balance_pct']:+.1f}% vs the first" +
+                          (f", km times vary {m['pace_cv_pct']:.1f}%." if m.get("pace_cv_pct") is not None else ".")))
+        if m.get("hr_rise_s") is not None:
+            notes.append(("\u2022", f"Heart-rate rise time (63%): {m['hr_rise_s']:.0f} s."))
+        if m.get("best"):
+            notes.append(("\u2022", "Best in this run: " + ", ".join(f"{k} {fmt_time(v[0])}" for k, v in m["best"].items()) + "."))
+        for e in m.get("efforts") or []:
+            notes.append(("\u2022", f"Effort at {fmt_time(e['start'])}: {fmt_time(e['dur'])}, {e['dist']:.0f} m" + (f", {core.format_pace(e['pace'])}/km" if e["pace"] else "")
+                          + (f", HR {e['hr']:.0f}" if e["hr"] else "")))
+        if m.get("hr_clipped_s"):
+            warning = (f"\u26a0 The heart rate sits at its maximum for {m['hr_clipped_s']} s: a clipped recording, left out of the metrics (zones, TRIMP and training "
+                       "effect are a minimum). Point the Health Sync folder at the FIT files to get the real values.")
+        d = m["date"]
+        title, subtitle = f"{d[8:]}/{d[5:7]}/{d[:4]}  {m['time']}", f"{m['dist_km'] or 0:.2f} km"
+    elif row:
+        title, subtitle = f"{row['date']}  {row['time']}", f"{row['dist_km']} km"
+    else:
+        return None
+    return {"title": title, "subtitle": subtitle, "badge": badge, "facts": facts, "tiles": tiles, "zones": zones, "reps": reps, "notes": notes,
+            "warning": warning, "has_metrics": bool(m)}
 
 
 # ─── Text for the GUI ────────────────────────────────────────────────────────

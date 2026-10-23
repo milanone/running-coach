@@ -277,6 +277,21 @@ class RunMetricsTests(unittest.TestCase):
             steady = R.run_panel(rows[0])
             self.assertEqual((steady["badge"], steady["reps"]), ("", []))
             self.assertAlmostEqual(sum(steady["zones"]), rows[0]["elapsed_s"] / 60.0, delta=rows[0]["elapsed_s"] / 60.0 * 0.3 + 1)
+            # the summary of a run: its facts from the history row, what reading the CSV added, and no metrics yet
+            row = next(r for r in history if P.session_key(r) == ("2026-05-14", "07:00"))
+            detail = {"alt": (50.8, 59.2), "notes": [("\u26a0", "Humidity >75%: thermoregulation impaired")]}
+            full = R.run_panel(rows[3], row, detail)
+            facts = dict(full["facts"])
+            self.assertEqual(list(facts), ["Duration", "Pace", "Average HR", "TSS", "EF", "Drift", "Weather", "Altitude"])
+            self.assertEqual((facts["Duration"], facts["Altitude"], facts["Weather"]), (row["duration_hms"], "51 to 59 m", "-"))
+            self.assertEqual(full["notes"][0], ("\u26a0", "Humidity >75%: thermoregulation impaired"))      # what the CSV added comes first
+            self.assertTrue(full["has_metrics"])
+            wet = R.run_panel(rows[3], dict(row, temp_c="17.4", humidity_pct="78", wind_kmh="9.7"))
+            self.assertEqual(dict(wet["facts"])["Weather"], "17.4 \u00b0C, 78%, 9.7 km/h")
+            early = R.run_panel(None, row, detail)                                              # the metrics are not computed yet
+            self.assertEqual((early["has_metrics"], early["tiles"], early["reps"], early["title"]), (False, [], [], f"{row['date']}  {row['time']}"))
+            self.assertEqual(dict(early["facts"])["Pace"], f"{row['pace_minkm']} /km")
+            self.assertIsNone(R.run_panel(None))                                                # nothing to show without a run
             empty = R.dashboard(None, None)
             self.assertEqual((empty["next"], empty["load"], empty["vo2"], empty["races"], empty["best"]), (None, None, None, None, []))
 

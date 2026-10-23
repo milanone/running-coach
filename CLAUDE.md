@@ -30,15 +30,16 @@ folder shown in the first one is a placeholder typed into the entry after loadin
 
 - `parse_run_csv.py`: the logic (no command line): `load_csv` / `extract_points` (the `time` column may be an ISO
   timestamp or elapsed seconds, with the start taken from the file name), `compute_distances` (the file's `distance` column, else
-  haversine GPS with an estimate for the pre-GPS lock-up), `km_splits` (altitude at the start and end of each km, read as saved: no filtering and no ascent total, removed on purpose, see the note under *Run detail tab*),
+  haversine GPS with an estimate for the pre-GPS lock-up), `km_splits` (altitude at the start and end of each km, read as saved: no filtering and no ascent total, removed on purpose, see the note under *Chart view*),
   `detect_sprint` (last full km faster by `SPRINT_PACE_S` and `SPRINT_HR_BPM` higher than the median), `cardiac_drift`
   (warm-up `WARMUP_S` and sprint excluded), `compute_tss`, `compute_ef`, `fetch_weather` (Open-Meteo, silent on failure),
   `compute_recommendations`, the history I/O (`load_history`, `save_history`, `upsert`, `merge_sessions`) and
   `analyze_file` / `import_sessions` used by the GUI. Personal parameters are constants at the top (`THRESHOLD_HR`,
   `EF_BASELINE`, the `DRIFT_*` thresholds...).
 - `run_metrics.py`: the advanced metrics, see the section below.
-- `running-coach-gui.pyw`: class `App` (Tkinter): History tab (sortable table, per-km detail), Gauges tab (see below), Charts tab
-  (hand-drawn on a `tk.Canvas`, with a 3-session moving average), no Next session tab (the advice for the next run is the top block of the Fitness tab: `run_metrics.next_session`, the core's `compute_recommendations` refined with the load ratio and the pace at a fixed heart rate). The import runs in a thread and
+- `running-coach-gui.pyw`: class `App` (Tkinter): two tabs, **Today** (the cards, the best efforts, *Trends* and *Where you stand*) and **Runs** (one list of
+  sessions and, for the selected run, *Summary*, *Chart*, *Map* and *Gauges*), see *Layout of the window* below. The advice for the next run is the first card
+  of Today: `run_metrics.next_session`, the core's `compute_recommendations` refined with the load ratio and the pace at a fixed heart rate. The import runs in a thread and
   reports through a queue polled by `_poll`; `import_now()` is the synchronous version used by the tests.
   The data folder is remembered in `~/.running_coach_gui.json`.
 
@@ -51,11 +52,13 @@ run or merge, which once made the whole history be read again at every tab open;
 `compute_all` from `hr_speed_table`, kept with each run). A cold start (no file, a new `CACHE_VERSION`) was 22 s for 37 runs, 85% of it in
 `extract_points` trying six date formats on every second of a CSV whose time is elapsed seconds (`NUMBER` now skips that) and 0.4 s per run in
 reading a FIT (`FIT_MIN_AT_MAX`: only for a CSV that looks clipped); it is ~1.6 s now, serial. A pool of processes was tried (1.2 s) and dropped: it
-saves little and spawning children from a `.pyw` on Windows is fragile. The Fitness tab has a *Recompute all metrics* button (deletes the file), `summary()` the figures behind the Fitness tab, `dashboard(adv, summ)` and `run_panel(m)` that same tab as plain data (the cards: next session,
-training status, VO2max, race predictions, the best efforts; the panel of a run: tiles, zone minutes, repetitions, notes), tested without Tk;
+saves little and spawning children from a `.pyw` on Windows is fragile. The Today tab has a *Recompute all metrics* button (deletes the file), `summary()` the figures behind the Today tab, `dashboard(adv, summ)` and `run_panel(m, row, details)` that same tab as plain data (the cards: next session,
+training status, VO2max, race predictions, the best efforts; the summary of a run: facts from its history row, metric tiles, zone minutes, repetitions, notes, and it works with `m` = None while the metrics
+are being computed), tested without Tk;
 `summary_lines()` / `run_lines()` are the older text forms, still there. The athlete's parameters (`athlete.json`: `hr_max`, `hr_rest`, `mass_kg`, `cadence_factor`, `hr_ref`, `hr_max_estimated`, `age`, `sex`, `height_cm`) live in the private data folder
 and are Francesco's own; the defaults in the code are generic on purpose (this repo is public: never write his body values here).
-The GUI computes them lazily in a thread (`ensure_fitness`, only when the Fitness tab or Charts on an `adv.` metric is selected): the thread gets
+The GUI computes them in a thread whenever the history changes (`start_fitness`; it was lazy, per tab, until the list and the metrics became one, because the
+list has metric columns and the file of results makes it quick): the thread gets
 plain values and a `threading.Event` to cancel, never `self` (a Tk object released in another thread crashes with "Tcl interpreter is leaked").
 
 What each estimate rests on, and how far it is checked (nothing here is validated against a Garmin or a lab). Sources read on 2026-10-13:
@@ -97,16 +100,30 @@ What each estimate rests on, and how far it is checked (nothing here is validate
   The acute/chronic ratio with exponential averages (CTL/ATL) swung between 0.4 and 1.5 for a once-a-week runner, so the ratio uses the 7-day
   and 28-day sums instead.
 
-## Fitness tab layout (redone 2026-10-22)
+## Layout of the window (redone 2026-10-23, "plan A")
 
-It used to be one wall of text (the advice and the summary in a `tk.Text` at the top, a table, and the detail of a run as text on the right). Now
-`_build_fitness_tab` has a header (message, *Recompute all metrics*), a strip of four cards (`_card`, filled by `_fill_dashboard` from
-`rm.dashboard`: a big headline in the colour of its tone, a line, rows of label and value, selectable notes), a row of the best efforts, the table of
-runs on the left and the panel of the selected run on the right (`_show_fit_panel` from `rm.run_panel`: tiles, `_draw_zone_bar`, a `Treeview` of the
-repetitions, notes; scrollable). The panel has a fixed width and the table gives way (a `PanedWindow` let the panel be cut off at the default window
-size). `apply_fitness` selects the newest run. `fit_message` replaces the old text for "Computing... 12 of 37 runs", errors and a missing
-`athlete.json`; `fit_view` and `fit_panel` hold the data being shown, which is what the tests read. Checked on the real window at 1100x720 and 1250x820.
-Not changed here and open: the best efforts of an interval workout over 3 km include the recoveries, and the Riegel prediction can start from one.
+The window opens at `WINDOW_FRACTION` (0.8) of the screen in both directions, centred, never below `MIN_WINDOW` (900x600) nor beyond the screen
+(`window_geometry(screen_w, screen_h)`, a pure function, tested).
+
+Before there were a History list, a Fitness list (nearly the same rows), a gauges drop-down and four tabs that did not share a selection, and the Fitness
+cards did not change with the run. Now: **Today** = `_build_today_tab` (header with `fit_message` and *Recompute all metrics*, the strip of four cards
+(`_card`, `_fill_dashboard` from `rm.dashboard`), the best efforts, then a notebook *Trends* (`_build_chart_tab`, `draw_chart`) and *Where you stand*). **Runs** =
+`_build_runs_tab`: a `PanedWindow` with the list (`self.tree`, extended selection, one iid `date|time` per run) and `self.run_tabs` (Notebook: `summary_tab`,
+`run_tab` = Chart, `map_tab`, `gauge_tab`). ONE selection drives them all: `show_detail` (bound to the list) reads the CSV, fills the facts and the km table,
+and calls `show_run_summary` (`rm.run_panel(metrics, row, run_extra)`), `draw_gauges`, `draw_run`, `draw_map`; hidden canvases do nothing until they have a size, and the map
+draws only when `_run_view_visible(map_tab)` (the tile policy). The list: `RUN_COLUMNS` (history fields, metrics from `compute_all` through `METRIC_CELLS`, and
+`note`), `DEFAULT_COLUMNS` shown, the *Columns* menu (`toggle_column`, `displaycolumns`), filters (`filtered_history`: `KIND_FILTERS`, `PERIOD_FILTERS`),
+sorting on any column, rows tagged `merged` / `intervals`. The metrics arrive from the thread after the list is drawn: `refresh_cells` fills their columns
+in place (no new selection event, so no reload of the run); a sort by a metric column rebuilds the list instead. Config keys `columns` and `last_run` bring
+back the columns and the open run. `show_run_tab(tab)` / `show_today_tab(tab)` are how tests and code open a view. A cancelled metrics thread can still hold
+a CSV open, so `fit_threads` keeps all of them and `_close` joins them (a temp directory could not be deleted on Windows otherwise). The first attempt put the cards in
+a vertical `PanedWindow` and they were squashed to nothing: plain `pack` instead. The Summary tab used to have a text block with the facts of the run (date, km,
+duration, HR, EF, drift, TSS, weather, altitude, notes) above a formatted panel that repeated most of it, plus a km table beside it: the facts are now tiles of the
+panel (`run_panel(m, row, details)`; `details` = altitude and notes from `_show_detail`, which only reads the CSV and fills `run_kms` and `run_extra`), the km table is
+part of the panel, and `_show_fit_panel` has two blocks that sit side by side when `_layout_panel` finds room (measured with `winfo_reqwidth`) and one under the
+other when not. The gauge cards (`_gauge_cards`) take as many columns as fit, up to three (each needs ~250 px), the dial and the text scale with the card (`_draw_gauge(cv, g, w, h)`),
+and `_gauges_resized` draws them again, once the window has stopped changing width, for the new width. Checked on the real window at 1000x700 and 1200x800. `apply_fitness` is also where `fit_view` (what the cards show) is set.
+Open and not done here: the best efforts of an interval workout over 3 km include the recoveries, and the Riegel prediction can start from one.
 
 ## Gauges tab
 
@@ -130,8 +147,8 @@ and `sex` in `athlete.json` (entered with the *Athlete...* button, `edit_athlete
 keeps keys it does not know); they are left out of the metrics cache key because they only place the VO2max. The text of the cards is in read-only `tk.Text` widgets (`_selectable`: typing blocked, Ctrl+C and a right-click menu work, the height
 comes from a pixel-measured greedy wrap) so that it can be selected and copied; a label cannot. The GUI (`_build_gauges_tab`, `draw_gauges`,
 `_draw_gauge`) draws each dial on a `tk.Canvas` with `create_arc(style="arc")`, bands as arcs and a needle; `fit_summ` is `gauge_summ`,
-set by `apply_fitness`, so the tab is filled by the same lazy thread as the Fitness tab (`ensure_fitness` also starts it when Gauges is
-selected). The README screenshot is synthetic with the placeholder data path.
+set by `apply_fitness`. The gauges named in `NOW_GAUGES` (load ratio, form, VO2max) are about today and are drawn on the Today tab (*Where you stand*,
+`draw_now_gauges`); the others are about the selected run (`draw_gauges`, 2 columns in the Gauges view). The README screenshot is synthetic with the placeholder data path.
 
 ## Interval workouts (added 2026-10-22)
 
@@ -168,7 +185,7 @@ per second are averaged, the first FIT record is second 0 of the CSV; `fitparse`
 maximum is dropped from `series()`; a constant heart rate is not treated as clipped, so synthetic runs are unaffected). The metrics cache key
 includes the FIT file's mtime (`CACHE_VERSION` 3). Tests use a stub `fitparse` module: no real FIT file is in the repo.
 
-## Run detail tab
+## Chart view (the second-by-second chart of a run)
 
 `analyze_file` also returns `points` (the per-second dicts: `ts`, `hr`, `speed` (m/s, the `velocity_smooth` column), `cadence`, `alt_raw`
 (`altitude`), `alt_fixed` (`fixed_altitude`, intervals.icu's corrected elevation), `lat`/`lon`, `dist_m`). The tab draws them on a `tk.Canvas`
@@ -181,7 +198,7 @@ not from FIT + TCX: lat/lng/altitude identical per second, heart rate/cadence/sp
 resampled, `velocity_smooth` = the FIT `speed`, `distance` = integral of that speed, `fixed_altitude` its own correction (checked 2026-10-13 on Francesco's out-and-back road, ~976 m with a constant ~0.65% slope, 58 m to 52 m: `altitude` is linear in the position along the road, R2 0.98-0.99 per leg, same slope both ways; `fixed_altitude` wiggles by +-2 m, R2 0.07-0.59, so it is NOT used: `extract_points` prefers `altitude`). The TCX has no speed,
 so its distance can only come from the GPS (2.6% shorter) and its lap total is unreliable.
 
-## Map tab
+## Map view
 
 `draw_map` (interactive: `map_press`/`map_drag` pan, `map_zoom` on the wheel keeps the world pixel under the cursor fixed, `map_hover`, `map_fit`; the view is `map_view` = (zoom, centre x, centre y in world pixels), `None` = fit the track, reset on every new selection) puts the GPS track (the `lat`/`lon` of the points kept for the Run detail tab) over OpenStreetMap tiles on a `tk.Canvas`; no new
 dependency: the PNG tiles are loaded with `tk.PhotoImage` (Tk 8.6 reads PNG), the Web-Mercator maths is in the core (`world_px`, `fit_zoom`,
@@ -189,7 +206,7 @@ dependency: the PNG tiles are loaded with `tk.PhotoImage` (Tk 8.6 reads PNG), th
 (`_draw_speed_track`, consecutive segments of one colour are drawn as one canvas line, to keep the redraw small: it runs on every mouse move while dragging). Tiles are fetched one at a time by ONE
 persistent worker thread (`_tile_worker`, fed by `tile_req`, answers polled by `_tile_poll` through `tile_queue`; it skips tiles no longer in `map_wanted`, so a fast drag
 does not download what was already scrolled away) and cached in `~/.running_coach_tiles` (outside the repos, the data
-folder and the Drive mirror). Nothing is downloaded unless the Map tab is the selected one. The tile policy requires an identifying `User-Agent`,
+folder and the Drive mirror). Nothing is downloaded unless the Map view is the one showing. The tile policy requires an identifying `User-Agent`,
 a cache and the visible attribution "(c) OpenStreetMap contributors" (drawn on the canvas): keep all three. Checked live on 2026-10-13 on the run of
 12/10 (15 tiles in ~3 s, track on the right streets). Do not publish a screenshot of a real run's map (it shows where Francesco runs): the README one is a
 synthetic loop made by the screenshot script. The map, like the weather, talks to the network; the tests mock `fetch_tile`.
@@ -207,7 +224,7 @@ Verified live on 2026-10-13: 37 runs listed since April, 16 identical to the exi
 
 ## Merged outings
 
-GUI: select two or more rows in the History table (extended selection), right-click, *Merge runs* / *Unmerge runs*
+GUI: select two or more rows in the Runs list (extended selection), right-click, *Merge runs* / *Unmerge runs*
 (`merge_selected`, `unmerge_selected`, backed by `merge_runs()` / `unmerge_run()` in the core, which also write the JSON below).
 The popup menu was checked on the real GUI; the tests call the same methods but not `tk_popup` (it blocks).
 

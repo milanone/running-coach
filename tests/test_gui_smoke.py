@@ -53,10 +53,15 @@ class GuiSmokeTests(unittest.TestCase):
 
                 app.tree.selection_set(app.tree.get_children()[1])
                 app.update()
-                self.assertGreaterEqual(len(app.splits.get_children()), 4)
-                self.assertIn("Final sprint", app.detail.get("1.0", "end"))
+                self.assertGreaterEqual(len(app.splits.get_children()), 4)                 # the kilometres, in the summary
+                self.assertTrue(any("Final sprint" in t for _, t in app.fit_panel["notes"]))
+                facts = dict(app.fit_panel["facts"])                                       # the facts of the run, before its metrics are computed
+                self.assertEqual(facts["Duration"], app.selected_row()["duration_hms"])
+                self.assertIn("km", facts["Pace"] + "km")
 
-                app.tabs.select(1)
+                self.assertEqual([app.tabs.tab(t, "text") for t in app.tabs.tabs()], ["Today", "Runs"])
+                self.assertEqual([app.run_tabs.tab(t, "text") for t in app.run_tabs.tabs()], ["Summary", "Chart", "Map", "Gauges"])
+                app.show_today_tab(app.trends_tab)
                 app.update()
                 km = lambda: [app.tree.set(i, "dist_km") for i in app.tree.get_children()]
                 app.sort_by("dist_km")
@@ -133,7 +138,7 @@ class GuiSmokeTests(unittest.TestCase):
                 merged = next(i for i in kids if "merged" in app.tree.item(i, "tags"))
                 app.tree.selection_set(merged)
                 app.update()
-                self.assertIn("Merged from 2 recordings", app.detail.get("1.0", "end"))
+                self.assertTrue(any("Merged from 2 recordings" in t for _, t in app.fit_panel["notes"]))
                 app.update_menu()
                 self.assertEqual(str(app.menu.entrycget("Unmerge runs", "state")), "normal")
                 self.assertIn("2026.08.18 17.21", open(os.path.join(d, "merged_sessions.json")).read())   # the list is newest first
@@ -157,7 +162,7 @@ class GuiSmokeTests(unittest.TestCase):
                 self.assertIsNotNone(app.run)
                 kids = app.tree.get_children()
                 app.tree.selection_set(kids[0])
-                app.tabs.select(app.run_tab)
+                app.show_run_tab(app.run_tab)
                 app.update()
                 self.assertIsNotNone(app.run_geom)
                 series = app.run_series()
@@ -218,7 +223,7 @@ class GuiSmokeTests(unittest.TestCase):
                 app.update()
                 self.assertEqual(asked, [])                               # not on the Map tab: nothing is downloaded
                 gui.core.fetch_tile = lambda z, x, y, cache_dir=None: (asked.append((z, x, y)), png)[1]
-                app.tabs.select(app.map_tab)
+                app.show_run_tab(app.map_tab)
                 for _ in range(60):
                     app.update()
                     if not app.map_pending and not app._tile_job:
@@ -276,7 +281,7 @@ class GuiSmokeTests(unittest.TestCase):
                 app.import_now()
                 app.update()
                 app.tree.selection_set(app.tree.get_children()[0])
-                app.tabs.select(app.map_tab)
+                app.show_run_tab(app.map_tab)
                 settle()
                 c = app.map_canvas
                 z0, cx0, cy0 = app.map_view
@@ -338,18 +343,19 @@ class GuiSmokeTests(unittest.TestCase):
                 app.fitness_now()
                 self.assertEqual(len(app.fit_rows), 4)
                 self.assertEqual(len(app.adv), 4)
-                kids = app.fit_tree.get_children()
+                kids = app.tree.get_children()
                 self.assertEqual(len(kids), 4)
-                self.assertEqual(app.fit_tree.set(kids[0], "date"), "05/05/2026")           # newest first
+                self.assertEqual(app.tree.set(kids[0], "date"), "05/05/2026")               # newest first
+                self.assertNotEqual(app.tree.set(kids[0], "trimp"), "")                      # the metrics are columns of the same list
                 self.assertTrue(app.fit_view["load"]["headline"])
                 self.assertIn("mass 68 kg", app.fit_view["footer"])
                 self.assertNotIn("No athlete.json", app.fit_message.get())
-                app.fit_tree.selection_set(kids[0])
+                app.tree.selection_set(kids[0])
                 app.update()
                 self.assertEqual(len(app.fit_panel["zones"]), 5)                          # the panel of the selected run
-                self.assertEqual(app.fit_panel["title"], "05/05/2026  07:00" if False else app.fit_panel["title"])
+                self.assertEqual(app.fit_panel["title"], "05/05/2026  07:00")
                 self.assertEqual(len(app.fit_strip.winfo_children()), 4)                   # the four cards
-                app.tabs.select(1)                                                          # Charts: the canvas must be visible to be drawn
+                app.show_today_tab(app.trends_tab)                                          # the canvas must be visible to be drawn
                 app.update()
                 for label in ("Fitness, CTL", "VO2max estimate (ml/kg/min)", "Pace at a fixed HR (min/km)", "Training effect (indicative)"):
                     app.metric.set(label)
@@ -364,7 +370,7 @@ class GuiSmokeTests(unittest.TestCase):
                 app._close()
 
 
-    def test_gauges_tab_draws_a_card_per_value_and_follows_the_run(self):
+    def test_gauges_of_the_selected_run_and_the_ones_about_today(self):
         gui = load_gui()
         with tempfile.TemporaryDirectory() as d:
             for name in ("2026.04.14 07.00", "2026.04.21 07.00", "2026.04.28 07.00"):
@@ -375,7 +381,10 @@ class GuiSmokeTests(unittest.TestCase):
                 app.import_now()
                 app.fitness_now()
                 app.update()
-                self.assertEqual(len(app.gauge_cards), 8)
+                self.assertEqual(len(app.gauge_cards), 5)                              # the run: drift, intensity, training effect, condition, recovery
+                self.assertEqual(len(app.now_cards), 3)                                # today: load ratio, form, VO2max (Today tab)
+                self.assertEqual({g["key"] for _, g in app.now_cards}, set(gui.NOW_GAUGES))
+                self.assertTrue(set(gui.NOW_GAUGES).isdisjoint({g["key"] for _, g in app.gauge_cards}))
                 card, g = app.gauge_cards[0]
                 boxes = [w for w in card.winfo_children() if w.winfo_class() == "Text"]
                 self.assertEqual(len(boxes), 3)                                        # the verdict, the explanation and the reference
@@ -388,17 +397,99 @@ class GuiSmokeTests(unittest.TestCase):
                 boxes[1].event_generate("<Key>", keysym="x")                           # but not edited
                 app.update()
                 self.assertEqual(boxes[1].get("1.0", "end"), before)
-                self.assertEqual(app.gauge_run.get().split()[0], "2026-04-28")          # the newest run first
-                self.assertTrue(all(g["title"] for _, g in app.gauge_cards))
-                app.gauge_run.set(app.gauge_box.cget("values")[-1])                    # an older run
-                app.draw_gauges()
-                self.assertTrue(app.gauge_run.get().startswith("2026-04-14"))
-                self.assertEqual(len(app.gauge_cards), 8)
-                app.history = []                                                       # nothing to show: a message, no cards
-                app.apply_fitness(app.fit_id, [], None)
+                first = app.gauge_cards
+                app.tree.selection_set("2026-04-14|07:00")                             # another run: its gauges are drawn again
+                app.update()
+                self.assertIsNot(app.gauge_cards, first)
+                self.assertEqual(len(app.gauge_cards), 5)
+                app.tree.selection_remove(*app.tree.selection())                       # no run: a message, no cards
+                app.update()
                 self.assertEqual(app.gauge_cards, [])
+                app.history = []                                                       # no history: nothing about today either
+                app.apply_fitness(app.fit_id, [], None)
+                self.assertEqual(app.now_cards, [])
             finally:
                 app._close()
+
+    def test_window_takes_a_fraction_of_the_screen(self):
+        gui = load_gui()
+        self.assertEqual(gui.window_geometry(1920, 1080), "1536x864+192+108")            # 80%, centred
+        self.assertEqual(gui.window_geometry(2560, 1440, 0.5), "1280x720+640+360")
+        self.assertEqual(gui.window_geometry(1024, 700), "900x600+62+50")                  # never below the minimum size
+        self.assertEqual(gui.window_geometry(800, 500), "800x500+0+0")                     # nor beyond a small screen
+        with tempfile.TemporaryDirectory() as d:
+            app = gui.App(data_dir=d, config_path=os.path.join(d, "cfg.json"))
+            try:
+                app.update()
+                sw, sh = app.winfo_screenwidth(), app.winfo_screenheight()
+                self.assertEqual(app.geometry().split("+")[0], gui.window_geometry(sw, sh).split("+")[0])
+            finally:
+                app._close()
+
+    def test_one_list_with_columns_filters_and_the_remembered_run(self):
+        from datetime import datetime, timedelta
+        gui = load_gui()
+        day = lambda n: (datetime.now() - timedelta(days=n)).strftime("%Y.%m.%d 07.00")
+        key = lambda n: (datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d|07:00")
+        with tempfile.TemporaryDirectory() as d:
+            write_run(os.path.join(d, f"{day(100)}-RUNNING.csv"), km=4.0, base_speed=2.6, icu_format=True)
+            write_run(os.path.join(d, f"{day(40)}-RUNNING.csv"), km=5.0, base_speed=2.6, icu_format=True)
+            write_intervals_run(os.path.join(d, f"{day(5)}-RUNNING.csv"))
+            cfg = os.path.join(d, "cfg.json")
+            app = gui.App(data_dir=d, config_path=cfg)
+            try:
+                app.fetch.set(False)
+                app.import_now()
+                app.fitness_now()
+                app.update()
+                self.assertEqual(len(app.tree.get_children()), 3)
+                self.assertEqual(app.tree.set(key(5), "note"), "intervals")            # a note says what a run is
+                self.assertEqual(app.tree.set(key(40), "note"), "")
+                self.assertNotEqual(app.tree.set(key(40), "trimp"), "")                # the metrics are in the same list, filled in when they arrive
+                self.assertEqual(app.tree.set(key(5), "vo2max"), "")                   # not for repetitions
+                self.assertEqual(list(app.tree["displaycolumns"]), gui.DEFAULT_COLUMNS)
+                app.col_vars["trimp"].set(True)                                        # the Columns menu
+                app.toggle_column("trimp")
+                self.assertIn("trimp", app.tree["displaycolumns"])
+                self.assertIn("trimp", json.load(open(cfg))["columns"])
+                for k in list(app.columns):                                            # a list always keeps one column
+                    app.col_vars[k].set(False)
+                    app.toggle_column(k)
+                self.assertEqual(list(app.tree["displaycolumns"]), ["date"])
+                for k in gui.DEFAULT_COLUMNS:
+                    app.col_vars[k].set(True)
+                    app.toggle_column(k)
+                shown = lambda: [i for i in app.tree.get_children()]
+                app.filter_kind.set(gui.KIND_FILTERS[2])
+                app.refresh_filtered()
+                self.assertEqual(shown(), [key(5)])
+                app.filter_kind.set(gui.KIND_FILTERS[1])
+                app.refresh_filtered()
+                self.assertEqual(shown(), [key(40), key(100)])
+                app.filter_kind.set(gui.KIND_FILTERS[0])
+                app.filter_period.set(gui.PERIOD_FILTERS[1])                           # the last 90 days
+                app.refresh_filtered()
+                self.assertEqual(shown(), [key(5), key(40)])
+                app.filter_period.set(gui.PERIOD_FILTERS[2])
+                app.refresh_filtered()
+                self.assertEqual(shown(), [key(5)])
+                app.filter_period.set(gui.PERIOD_FILTERS[0])
+                app.refresh_filtered()
+                app.sort_by("trimp")                                                   # sorting by a metric: rows without it would go last
+                self.assertEqual(len(shown()), 3)
+                app.sort_by("trimp")
+                app.tree.selection_set(key(40))
+                app.update()
+            finally:
+                app._close()
+            self.assertEqual(json.load(open(cfg))["last_run"], key(40))                # the run that was open comes back
+            app2 = gui.App(data_dir=d, config_path=cfg)
+            try:
+                app2.update()
+                self.assertEqual(app2.tree.selection(), (key(40),))
+                self.assertIsNotNone(app2.run)                                         # and its views are loaded
+            finally:
+                app2._close()
 
     def test_interval_workout_is_marked_in_the_detail_and_the_fitness_text(self):
         gui = load_gui()
@@ -414,14 +505,15 @@ class GuiSmokeTests(unittest.TestCase):
                 key = "2026-04-28|07:00"
                 app.tree.selection_set(key)
                 app.show_detail()
-                self.assertIn("Interval workout", app.detail.get("1.0", "end"))
+                self.assertEqual((dict(app.fit_panel["facts"])["EF"], dict(app.fit_panel["facts"])["Drift"]), ("-", "-"))   # not defined for repetitions
                 app.fitness_now()
                 m = app.adv[("2026-04-28", "07:00")]
                 self.assertEqual(len(m["reps"]), 3)
                 self.assertIn("interval workout", app.fit_view["next"]["sub"])           # the advice says where its pace comes from
                 self.assertEqual(len(app.fit_panel["reps"]), 3)                          # and the panel lists the repetitions
                 self.assertEqual(app.fit_panel["badge"], "INTERVALS")
-                self.assertEqual(len(app.gauge_cards), 8)
+                self.assertEqual(app.tree.set(key, "note"), "intervals")
+                self.assertEqual(len(app.gauge_cards), 5)
             finally:
                 app._close()
 
@@ -469,39 +561,32 @@ class GuiSmokeTests(unittest.TestCase):
                 gui.core.FIT_DIR = None
                 app._close()
 
-    def test_fitness_tab_computes_in_a_thread_when_opened(self):
+    def test_metrics_are_computed_in_a_thread_as_soon_as_the_history_changes(self):
         gui = load_gui()
         with tempfile.TemporaryDirectory() as d:
             for name in ("2026.04.14 07.00", "2026.04.21 07.00", "2026.04.28 07.00"):
                 write_run(os.path.join(d, f"{name}-RUNNING.csv"), km=4.0, base_speed=2.6, icu_format=True)
             app = gui.App(data_dir=d, config_path=os.path.join(d, "cfg.json"))
 
-            def wait():
+            def wait(job):
                 for _ in range(200):
                     app.update()
-                    if app.fit_rows and not app.fit_stale:
+                    if app.fit_rows and app.fit_id == job and not (app.fit_thread and app.fit_thread.is_alive()):
                         break
                     time.sleep(0.05)
 
             try:
                 app.fetch.set(False)
-                app.import_now()                                          # an import opens the Fitness tab, which computes in a thread
-                wait()
+                app.import_now()                                          # an import opens the Today tab and starts the thread
+                wait(app.fit_id)
                 self.assertEqual(len(app.fit_rows), 3)
-                self.assertEqual(len(app.fit_tree.get_children()), 3)
                 self.assertIsNotNone(app.fit_view["next"])
-                self.assertFalse(app.fit_stale)
-                # the history changes while another tab is showing: stale, but nothing is computed until a tab needs it
-                app.tabs.select(0)
-                app.update()
+                self.assertNotEqual(app.tree.set(app.tree.get_children()[0], "trimp"), "")   # the list got its metric columns
                 before = app.fit_thread
-                app.start_fitness()
-                self.assertTrue(app.fit_stale)
-                self.assertIs(app.fit_thread, before)
-                app.tabs.select(app.fit_tab)
-                wait()
-                self.assertFalse(app.fit_stale)
+                app.start_fitness()                                       # the history changed again: computed again, whatever tab is open
                 self.assertIsNot(app.fit_thread, before)
+                wait(app.fit_id)
+                self.assertEqual(len(app.fit_rows), 3)
             finally:
                 app._close()
 

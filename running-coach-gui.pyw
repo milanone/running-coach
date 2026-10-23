@@ -13,7 +13,7 @@ import sys
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
-from datetime import datetime
+from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -47,22 +47,6 @@ METRICS = [
     ("HR rise time (s)", "adv.hr_rise_s", lambda v: v, lambda v: f"{v:.0f}", False),
     ("HR recovery in 60 s (bpm)", "adv.hrr60", lambda v: v, lambda v: f"{v:.0f}", False),
 ]
-# column of the Fitness table: key, title, width, formatter of the per-run metrics
-FITNESS_COLUMNS = [
-    ("date", "Date", 78, lambda m: f"{m['date'][8:]}/{m['date'][5:7]}/{m['date'][:4]}"),
-    ("time", "Time", 50, lambda m: m["time"]),
-    ("moving", "Moving", 58, lambda m: rm.fmt_time(m["moving_s"])),
-    ("trimp", "TRIMP", 50, lambda m: f"{m['trimp']:.0f}"),
-    ("te", "TE*", 40, lambda m: f"{m['te']:.1f}"),
-    ("vo2", "VO2max", 56, lambda m: "" if m["vo2max"] is None else f"{m['vo2max']:.1f}"),
-    ("pacehr", "Pace@HR", 60, lambda m: "" if m["pace_at_hr"] is None else core.format_pace(m["pace_at_hr"])),
-    ("hrspeed", "HR@speed", 72, lambda m: "" if m["hr_at_speed"] is None else f"{m['hr_at_speed']:.0f}"),
-    ("spm", "Steps/min", 62, lambda m: "" if m["spm"] is None else f"{m['spm']:.0f}"),
-    ("step", "Step m", 50, lambda m: "" if m["step_m"] is None else f"{m['step_m']:.2f}"),
-    ("power", "W*", 40, lambda m: "" if m["power_w"] is None else f"{m['power_w']:.0f}"),
-    ("perf", "Perf %", 50, lambda m: "" if m["perf_pct"] is None else f"{m['perf_pct']:+.1f}"),
-    ("tsb", "Form", 46, lambda m: "" if m["tsb"] is None else f"{m['tsb']:+.0f}"),
-]
 RUN_PANELS = [  # title, [(key in the series, colour, label)]: every value column of the CSV
     ("Speed (km/h)", [("spd", "#2f6fdb", "velocity_smooth")]),
     ("Heart rate (bpm)", [("hr", "#d64545", "heartrate")]),
@@ -81,11 +65,36 @@ def speed_color(f):
             return "#%02x%02x%02x" % tuple(round(ca[i] + (cb[i] - ca[i]) * t) for i in range(3))
 
 
-TABLE_COLUMNS = [
-    ("date", "Date", 90), ("time", "Time", 50), ("dist_km", "km", 55), ("duration_hms", "Duration", 75),
-    ("pace_minkm", "Pace", 60), ("avg_hr_bpm", "HR", 50), ("ef_m_beat", "EF", 60),
-    ("drift_pct", "Drift %", 65), ("tss", "TSS", 45), ("temp_c", "°C", 45),
+# The list of runs: key, title, width. The history fields come from the row, the metrics from the per-run results (blank until they are computed),
+# `note` says whether a run is an interval workout or several recordings merged. DEFAULT_COLUMNS are shown, the rest is in the Columns menu.
+RUN_COLUMNS = [
+    ("date", "Date", 78), ("time", "Time", 46), ("dist_km", "km", 46), ("duration_hms", "Duration", 66), ("pace_minkm", "Pace", 52),
+    ("avg_hr_bpm", "HR", 40), ("tss", "TSS", 40), ("note", "Note", 112), ("trimp", "TRIMP", 50), ("te", "TE*", 40), ("vo2max", "VO2max", 56),
+    ("ef_m_beat", "EF", 50), ("drift_pct", "Drift %", 56), ("pace_at_hr", "Pace@HR", 60), ("hr_at_speed", "HR@speed", 66),
+    ("spm", "Steps/min", 62), ("step_m", "Step m", 50), ("power_w", "W*", 40), ("perf_pct", "Perf %", 50), ("tsb", "Form", 46),
+    ("moving", "Moving", 56), ("temp_c", "\u00b0C", 40),
 ]
+DEFAULT_COLUMNS = ["date", "time", "dist_km", "pace_minkm", "avg_hr_bpm", "tss", "note"]
+HISTORY_COLUMNS = {"date", "time", "dist_km", "duration_hms", "pace_minkm", "avg_hr_bpm", "ef_m_beat", "drift_pct", "tss", "temp_c"}
+
+
+def _opt(m, key, fmt):
+    v = m.get(key)
+    return "" if v is None else fmt(v)
+
+
+METRIC_CELLS = {      # the text of a metric in the list, from a row of compute_all
+    "trimp": lambda m: _opt(m, "trimp", lambda v: f"{v:.0f}"), "te": lambda m: _opt(m, "te", lambda v: f"{v:.1f}"),
+    "vo2max": lambda m: _opt(m, "vo2max", lambda v: f"{v:.1f}"), "pace_at_hr": lambda m: _opt(m, "pace_at_hr", core.format_pace),
+    "hr_at_speed": lambda m: _opt(m, "hr_at_speed", lambda v: f"{v:.0f}"), "spm": lambda m: _opt(m, "spm", lambda v: f"{v:.0f}"),
+    "step_m": lambda m: _opt(m, "step_m", lambda v: f"{v:.2f}"), "power_w": lambda m: _opt(m, "power_w", lambda v: f"{v:.0f}"),
+    "perf_pct": lambda m: _opt(m, "perf_pct", lambda v: f"{v:+.1f}"), "tsb": lambda m: _opt(m, "tsb", lambda v: f"{v:+.0f}"),
+    "moving": lambda m: _opt(m, "moving_s", rm.fmt_time),
+}
+METRIC_FIELD = {"moving": "moving_s"}               # the column key when it differs from the field of the metrics
+KIND_FILTERS = ["All runs", "Steady runs", "Interval workouts"]
+PERIOD_FILTERS = ["All time", "Last 90 days", "Last 30 days"]
+NOW_GAUGES = ("load_ratio", "form", "vo2max")      # the gauges that are about today, not about a run: they go on the Today tab
 
 
 FIT_CARD_W, FIT_PANEL_W = 235, 330                                     # widths in pixels of the cards and of the panel of a run
@@ -94,6 +103,17 @@ GAUGE_W, GAUGE_H = 300, 168
 GAUGE_FILL = {"great": "#2e8b57", "good": "#4caf73", "ok": "#e6c04a", "warn": "#e8903a", "bad": "#d95050", "info": "#7aa7d9"}        # the bands of a gauge
 GAUGE_TEXT = {"great": "#1b6b3e", "good": "#1f7a45", "ok": "#8a6d00", "warn": "#b35f10", "bad": "#b02a2a", "info": "#3d6ea8"}        # the verdict text
 GAUGE_LEVEL = {"sourced": "from a source that was read", "secondary": "from secondary sources", "mine": "a rule of thumb of this program"}
+
+
+WINDOW_FRACTION = 0.8                      # the window opens at this fraction of the width and of the height of the screen
+MIN_WINDOW = (900, 600)
+
+
+def window_geometry(screen_w, screen_h, fraction=WINDOW_FRACTION):
+    """Tk geometry string 'WxH+X+Y' of a window that takes `fraction` of the screen (not below MIN_WINDOW, not beyond the screen), centred."""
+    w = min(screen_w, max(MIN_WINDOW[0], int(screen_w * fraction)))
+    h = min(screen_h, max(MIN_WINDOW[1], int(screen_h * fraction)))
+    return f"{w}x{h}+{(screen_w - w) // 2}+{(screen_h - h) // 2}"
 
 
 def load_config(path):
@@ -116,11 +136,15 @@ class App(tk.Tk):
     def __init__(self, data_dir=None, config_path=CONFIG_PATH):
         super().__init__()
         self.title("Running Coach")
-        self.geometry("1100x720")
-        self.minsize(900, 600)
+        self.geometry(window_geometry(self.winfo_screenwidth(), self.winfo_screenheight()))
+        self.minsize(*MIN_WINDOW)
         self.config_path = config_path
         cfg = load_config(config_path)
         self.history = []
+        known = {c[0] for c in RUN_COLUMNS}
+        self.columns = {k for k in (cfg.get("columns") or DEFAULT_COLUMNS) if k in known} or set(DEFAULT_COLUMNS)
+        self.last_run = cfg.get("last_run")                 # the run that was selected when the program was closed
+        self.adv = {}
         self.sort_col, self.sort_desc = "date", True
         self.queue = queue.Queue()
         self.busy = False
@@ -173,69 +197,118 @@ class App(tk.Tk):
     def _build_tabs(self):
         self.tabs = ttk.Notebook(self)
         self.tabs.pack(fill="both", expand=True, padx=8, pady=(0, 6))
-        self._build_history_tab()
-        self._build_chart_tab()
-        self._build_run_tab()
-        self._build_map_tab()
-        self._build_fitness_tab()
-        self._build_gauges_tab()
+        self._build_today_tab()
+        self._build_runs_tab()
+        self.tabs.bind("<<NotebookTabChanged>>", lambda e: self._tab_changed())
 
-    def _build_history_tab(self):
+    def _build_runs_tab(self):
+        """The list of runs, always at the left, and for the selected run its Summary, Chart, Map and Gauges."""
         tab = ttk.Frame(self.tabs)
-        self.tabs.add(tab, text="History")
-        paned = ttk.PanedWindow(tab, orient="vertical")
+        self.runs_tab = tab
+        self.tabs.add(tab, text="Runs")
+        paned = ttk.PanedWindow(tab, orient="horizontal")
         paned.pack(fill="both", expand=True)
-
-        top = ttk.Frame(paned)
-        paned.add(top, weight=3)
-        self.tree = ttk.Treeview(top, columns=[c[0] for c in TABLE_COLUMNS], show="headings", selectmode="extended")
-        for key, title, width in TABLE_COLUMNS:
+        left = ttk.Frame(paned)
+        paned.add(left, weight=2)
+        bar = ttk.Frame(left, padding=(0, 4, 0, 4))
+        bar.pack(fill="x")
+        self.filter_kind = tk.StringVar(value=KIND_FILTERS[0])
+        self.filter_period = tk.StringVar(value=PERIOD_FILTERS[0])
+        for var, values, width in ((self.filter_kind, KIND_FILTERS, 16), (self.filter_period, PERIOD_FILTERS, 12)):
+            box = ttk.Combobox(bar, textvariable=var, values=values, state="readonly", width=width)
+            box.pack(side="left", padx=(0, 4))
+            box.bind("<<ComboboxSelected>>", lambda e: self.refresh_filtered())
+        self.col_menu = tk.Menu(self, tearoff=0)
+        self.col_vars = {}
+        for key, title, _ in RUN_COLUMNS:
+            self.col_vars[key] = tk.BooleanVar(value=key in self.columns)
+            self.col_menu.add_checkbutton(label=title, variable=self.col_vars[key], command=lambda k=key: self.toggle_column(k))
+        ttk.Menubutton(bar, text="Columns", menu=self.col_menu).pack(side="right")
+        body = ttk.Frame(left)
+        body.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(body, columns=[c[0] for c in RUN_COLUMNS], show="headings", selectmode="extended")
+        for key, title, width in RUN_COLUMNS:
             self.tree.heading(key, text=title, command=lambda k=key: self.sort_by(k))
             self.tree.column(key, width=width, anchor="center")
+        self.tree["displaycolumns"] = self.columns_shown()
         self.update_headings()
-        sb = ttk.Scrollbar(top, orient="vertical", command=self.tree.yview)
+        sb = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
         self.tree.tag_configure("merged", background="#e6f0ff")
+        self.tree.tag_configure("intervals", foreground="#3d6ea8")
         self.tree.bind("<<TreeviewSelect>>", lambda e: self.show_detail())
-        self.tree.bind("<Double-1>", lambda e: self.tabs.select(self.run_tab) if self.tree.identify_row(e.y) else None)
+        self.tree.bind("<Double-1>", lambda e: self.run_tabs.select(self.run_tab) if self.tree.identify_row(e.y) else None)
         self.menu = tk.Menu(self, tearoff=0)
         self.menu.add_command(label="Merge runs", command=self.merge_selected)
         self.menu.add_command(label="Unmerge runs", command=self.unmerge_selected)
         self.tree.bind("<Button-3>", self.show_menu)
+        right = ttk.Frame(paned)
+        paned.add(right, weight=5)
+        self.run_tabs = ttk.Notebook(right)
+        self.run_tabs.pack(fill="both", expand=True)
+        self.run_tabs.bind("<<NotebookTabChanged>>", lambda e: self._tab_changed())
+        self._build_summary_tab()
+        self._build_run_tab()
+        self._build_map_tab()
+        self._build_gauges_tab()
 
-        bottom = ttk.Frame(paned, padding=(0, 6, 0, 0))
-        paned.add(bottom, weight=2)
-        left = ttk.Frame(bottom)
-        left.pack(side="left", fill="both", expand=True)
-        self.detail = tk.Text(left, height=12, width=52, state="disabled", wrap="word", relief="flat",
-                              background=self.cget("background"), font=("TkDefaultFont", 10))
-        self.detail.pack(fill="both", expand=True)
+    def _build_summary_tab(self):
+        tab = ttk.Frame(self.run_tabs)
+        self.summary_tab = tab
+        self.run_tabs.add(tab, text="Summary")
+        self.splits, self.run_kms, self.run_extra, self._panel_blocks = None, [], {}, None
+        body = ttk.Frame(tab)
+        body.pack(fill="both", expand=True, padx=4, pady=(6, 4))
+        self.fit_canvas, self.fit_inner = self._scroll_area(body, on_resize=lambda w: self._layout_panel(w))
 
-        right = ttk.Frame(bottom)
-        right.pack(side="left", fill="both", expand=True, padx=(10, 0))
-        cols = ("km", "pace", "hr", "dalt", "note")
-        self.splits = ttk.Treeview(right, columns=cols, show="headings", height=8)
-        for key, title, width in (("km", "km", 50), ("pace", "Pace", 70), ("hr", "HR", 55),
-                                  ("dalt", "Alt (m)", 60), ("note", "", 70)):
-            self.splits.heading(key, text=title)
-            self.splits.column(key, width=width, anchor="center")
-        self.splits.pack(fill="both", expand=True)
+    def _scroll_area(self, parent, width=None, on_resize=None):
+        """A vertically scrollable frame: (canvas, inner frame). With a width the frame keeps it, else it follows the canvas."""
+        canvas = tk.Canvas(parent, highlightthickness=0, background=self.cget("background"), **({"width": width} if width else {}))
+        sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(canvas, padding=(10, 0, 4, 6))
+        canvas.create_window((0, 0), window=inner, anchor="nw", tags="inner")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        def resized(e):
+            if not width:
+                canvas.itemconfigure("inner", width=e.width)
+            if on_resize:
+                on_resize(e.width)
 
-    def _build_chart_tab(self):
-        tab = ttk.Frame(self.tabs)
-        self.tabs.add(tab, text="Charts")
+        canvas.bind("<Configure>", resized)
+        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        return canvas, inner
+
+    def _build_chart_tab(self, parent):
+        tab = ttk.Frame(parent)
+        self.trends_tab = tab
+        parent.add(tab, text="Trends")
         row = ttk.Frame(tab, padding=8)
         row.pack(fill="x")
         ttk.Label(row, text="Metric:").pack(side="left")
         box = ttk.Combobox(row, textvariable=self.metric, values=[m[0] for m in METRICS],
-                           state="readonly", width=24)
+                           state="readonly", width=28)
         box.pack(side="left", padx=6)
-        box.bind("<<ComboboxSelected>>", lambda e: (self.draw_chart(), self.ensure_fitness()))
+        box.bind("<<ComboboxSelected>>", lambda e: self.draw_chart())
         self.canvas = tk.Canvas(tab, background="white", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.canvas.bind("<Configure>", lambda e: self.draw_chart())
+
+    def show_run_tab(self, tab):
+        """Open the Runs tab at one of its views (Summary, Chart, Map or Gauges)."""
+        self.tabs.select(self.runs_tab)
+        self.run_tabs.select(tab)
+
+    def show_today_tab(self, tab):
+        self.tabs.select(self.today_tab)
+        self.today_tabs.select(tab)
+
+    def _run_view_visible(self, tab):
+        return self.tabs.select() == str(self.runs_tab) and self.run_tabs.select() == str(tab)
 
     # ── data ─────────────────────────────────────────────────────────────
     def _dir(self):
@@ -290,14 +363,28 @@ class App(tk.Tk):
         if d:
             core.save_history(self.history, core.history_path(d))
 
+    def _cell(self, row, key, merged):
+        """The text of one cell of the list: a field of the history row, or a metric of the run (blank until the metrics are computed)."""
+        if key in HISTORY_COLUMNS:
+            return row.get(key, "")
+        if key == "note":
+            return ", ".join(n for n, on in (("intervals", row.get("kind") == "intervals"), ("merged", core.session_key(row) in merged)) if on)
+        m = self.adv.get(core.session_key(row))
+        return METRIC_CELLS[key](m) if m else ""
+
+    def _row_values(self, row, merged):
+        return [self._cell(row, k, merged) for k, _, _ in RUN_COLUMNS]
+
     def refresh_table(self, select=None):
         self.tree.delete(*self.tree.get_children())
         merged = self.merged_keys()
         for r in self.sorted_history():
             iid = "|".join(core.session_key(r))
-            self.tree.insert("", "end", iid=iid, values=[r.get(k, "") for k, _, _ in TABLE_COLUMNS],
-                             tags=("merged",) if core.session_key(r) in merged else ())
+            tags = (("merged",) if core.session_key(r) in merged else ()) + (("intervals",) if r.get("kind") == "intervals" else ())
+            self.tree.insert("", "end", iid=iid, values=self._row_values(r, merged), tags=tags)
         kids = self.tree.get_children()
+        if select is None:
+            select = self.last_run
         target = select if select in kids else (kids[0] if kids else None)
         if target:
             self.tree.selection_set(target)
@@ -305,7 +392,41 @@ class App(tk.Tk):
         else:
             self.show_detail()
 
+    def refresh_filtered(self):
+        current = self.tree.selection()
+        self.refresh_table(select=current[0] if current else None)
+
+    def refresh_cells(self):
+        """The metrics arrived: fill their columns in place (the selection and the views stay as they are)."""
+        if self.sort_col in METRIC_CELLS or self.sort_col == "note":
+            self.refresh_filtered()                      # the order itself depends on them
+            return
+        merged = self.merged_keys()
+        by_iid = {"|".join(core.session_key(r)): r for r in self.history}
+        for iid in self.tree.get_children():
+            if iid in by_iid:
+                self.tree.item(iid, values=self._row_values(by_iid[iid], merged))
+
+    def columns_shown(self):
+        return [k for k, _, _ in RUN_COLUMNS if k in self.columns] or ["date"]
+
+    def toggle_column(self, key):
+        if self.col_vars[key].get():
+            self.columns.add(key)
+        else:
+            self.columns.discard(key)
+        if not self.columns:                              # a list needs at least one column
+            self.columns.add("date")
+            self.col_vars["date"].set(True)
+        self.tree["displaycolumns"] = self.columns_shown()
+        self._save_config()
+
     def sort_value(self, row, key):
+        if key in METRIC_CELLS:
+            m = self.adv.get(core.session_key(row))
+            return None if not m else m.get(METRIC_FIELD.get(key, key))
+        if key == "note":
+            return self._cell(row, "note", self.merged_keys()) or None
         raw = str(row.get(key) or "").strip()
         if key == "date":
             return core.session_key(row)
@@ -323,16 +444,30 @@ class App(tk.Tk):
                 return None
         return core.safe_float(raw)
 
+    def filtered_history(self):
+        """The runs the filters above the list let through."""
+        rows = self.history
+        kind = self.filter_kind.get()
+        if kind == KIND_FILTERS[1]:
+            rows = [r for r in rows if r.get("kind") != "intervals"]
+        elif kind == KIND_FILTERS[2]:
+            rows = [r for r in rows if r.get("kind") == "intervals"]
+        days = {PERIOD_FILTERS[1]: 90, PERIOD_FILTERS[2]: 30}.get(self.filter_period.get())
+        if days:
+            limit = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            rows = [r for r in rows if core.session_key(r)[0] >= limit]
+        return rows
+
     def sorted_history(self):
-        """History ordered by the active column; rows without a value always go last."""
-        rows = sorted(self.history, key=core.session_key, reverse=True)
+        """The filtered history ordered by the active column; rows without a value always go last."""
+        rows = sorted(self.filtered_history(), key=core.session_key, reverse=True)
         keyed = [(self.sort_value(r, self.sort_col), r) for r in rows]
         present = sorted((kr for kr in keyed if kr[0] is not None), key=lambda kr: kr[0], reverse=self.sort_desc)
         return [r for _, r in present] + [r for v, r in keyed if v is None]
 
     def update_headings(self):
-        for key, title, _ in TABLE_COLUMNS:
-            arrow = (" ▼" if self.sort_desc else " ▲") if key == self.sort_col else ""
+        for key, title, _ in RUN_COLUMNS:
+            arrow = (" \u25bc" if self.sort_desc else " \u25b2") if key == self.sort_col else ""
             self.tree.heading(key, text=title + arrow)
 
     def sort_by(self, key):
@@ -407,9 +542,9 @@ class App(tk.Tk):
 
     # ── run detail (per-second values as saved in the CSV) ───────────────
     def _build_run_tab(self):
-        tab = ttk.Frame(self.tabs)
+        tab = ttk.Frame(self.run_tabs)
         self.run_tab = tab
-        self.tabs.add(tab, text="Run detail")
+        self.run_tabs.add(tab, text="Chart")
         row = ttk.Frame(tab, padding=8)
         row.pack(fill="x")
         self.run_title = tk.StringVar(value="")
@@ -450,7 +585,7 @@ class App(tk.Tk):
         if w < 200 or h < 200:
             return
         if not self.run:
-            c.create_text(w / 2, h / 2, text="Select a run in the History tab", fill="#777")
+            c.create_text(w / 2, h / 2, text="Select a run in the list", fill="#777")
             return
         data = self.run_series()
         xkey = "t" if self.run_x.get() == "Time" else "km"
@@ -533,9 +668,9 @@ class App(tk.Tk):
 
     # ── map: OpenStreetMap tiles under the GPS track (drag, wheel, hover) ──
     def _build_map_tab(self):
-        tab = ttk.Frame(self.tabs)
+        tab = ttk.Frame(self.run_tabs)
         self.map_tab = tab
-        self.tabs.add(tab, text="Map")
+        self.run_tabs.add(tab, text="Map")
         top = ttk.Frame(tab, padding=8)
         top.pack(fill="x")
         ttk.Label(top, textvariable=self.run_title, font=("TkDefaultFont", 10, "bold")).pack(side="left")
@@ -552,7 +687,6 @@ class App(tk.Tk):
         c.bind("<Button-5>", lambda e: self.map_zoom(e.x, e.y, -1))
         c.bind("<Motion>", self.map_hover)
         c.bind("<Leave>", lambda e: c.delete("hover"))
-        self.tabs.bind("<<NotebookTabChanged>>", lambda e: self._tab_changed())
         self.map_tiles = {}        # (z, x, y) -> PhotoImage, or None when the download failed
         self.map_pending = set()   # tiles asked of the worker thread and not yet back
         self.map_wanted = set()    # tiles of the current view: the worker skips the others (the view moved on)
@@ -616,13 +750,13 @@ class App(tk.Tk):
         c = self.map_canvas
         c.delete("all")
         self.map_geom = None
-        if self.tabs.select() != str(self.map_tab):
+        if not self._run_view_visible(self.map_tab):
             return                                    # tiles are downloaded only while the Map tab is open
         w, h = c.winfo_width(), c.winfo_height()
         if w < 200 or h < 200:
             return
         if not self.run:
-            c.create_text(w / 2, h / 2, text="Select a run in the History tab", fill="#777")
+            c.create_text(w / 2, h / 2, text="Select a run in the list", fill="#777")
             return
         data = self._map_data()
         if not data:
@@ -752,52 +886,40 @@ class App(tk.Tk):
             self._tile_job = self.after(100, self._tile_poll)
 
     # ── fitness: advanced metrics (estimates) ────────────────────────────
-    def _build_fitness_tab(self):
+    def _build_today_tab(self):
         tab = ttk.Frame(self.tabs)
-        self.fit_tab = tab
-        self.tabs.add(tab, text="Fitness")
-        head = ttk.Frame(tab)
+        self.today_tab = tab
+        self.tabs.add(tab, text="Today")
+        self.fit_footer = ttk.Label(tab, text="", foreground="#666", font=("TkDefaultFont", 8), wraplength=1100, justify="left")
+        self.fit_footer.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+        top = ttk.Frame(tab)
+        top.pack(fill="x")
+        head = ttk.Frame(top)
         head.pack(fill="x", padx=10, pady=(8, 2))
         self.fit_message = tk.StringVar(value="")
         ttk.Label(head, textvariable=self.fit_message, foreground="#b35f10").pack(side="left")
         ttk.Button(head, text="Recompute all metrics", command=self.recompute_fitness).pack(side="right")
         ttk.Label(head, text="The metrics of a run are kept in a file and recomputed only when the run changes.",
                   foreground="#666").pack(side="right", padx=10)
-        self.fit_strip = ttk.Frame(tab)                                   # the four cards
+        self.fit_strip = ttk.Frame(top)                                   # the four cards
         self.fit_strip.pack(fill="x", padx=8)
-        self.fit_best = ttk.Frame(tab)                                    # the best efforts
-        self.fit_best.pack(fill="x", padx=10, pady=(4, 0))
-        body = ttk.Frame(tab)
-        body.pack(fill="both", expand=True, padx=8, pady=(6, 2))
-        left = ttk.Frame(body)
-        cols = [c[0] for c in FITNESS_COLUMNS]
-        self.fit_tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
-        for key, title, width, _ in FITNESS_COLUMNS:
-            self.fit_tree.heading(key, text=title)
-            self.fit_tree.column(key, width=width, anchor="center", stretch=False)
-        sb = ttk.Scrollbar(left, orient="vertical", command=self.fit_tree.yview)
-        self.fit_tree.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self.fit_tree.pack(side="left", fill="both", expand=True)
-        self.fit_tree.bind("<<TreeviewSelect>>", lambda e: self.fit_show())
-        right = ttk.Frame(body)
-        self.fit_canvas = tk.Canvas(right, highlightthickness=0, background=self.cget("background"), width=FIT_PANEL_W + 24)
-        psb = ttk.Scrollbar(right, orient="vertical", command=self.fit_canvas.yview)
-        self.fit_canvas.configure(yscrollcommand=psb.set)
-        psb.pack(side="right", fill="y")
-        self.fit_canvas.pack(side="left", fill="both", expand=True)
-        self.fit_inner = ttk.Frame(self.fit_canvas, padding=(10, 0, 4, 6))
-        self.fit_canvas.create_window((0, 0), window=self.fit_inner, anchor="nw")
-        self.fit_inner.bind("<Configure>", lambda e: self.fit_canvas.configure(scrollregion=self.fit_canvas.bbox("all")))
-        self.fit_canvas.bind("<MouseWheel>", lambda e: self.fit_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
-        right.pack(side="right", fill="y", padx=(8, 0))               # the panel of a run keeps its width, the table gives way
-        left.pack(side="left", fill="both", expand=True)
-        self.fit_footer = ttk.Label(tab, text="", foreground="#666", font=("TkDefaultFont", 8), wraplength=1050, justify="left")
-        self.fit_footer.pack(side="bottom", fill="x", padx=10, pady=(0, 6), before=body)       # first in the packing order: kept in view when the window is short
+        self.fit_best = ttk.Frame(top)                                    # the best efforts
+        self.fit_best.pack(fill="x", padx=10, pady=(4, 4))
+        bottom = ttk.Frame(tab)
+        bottom.pack(fill="both", expand=True)
+        self.today_tabs = ttk.Notebook(bottom)
+        self.today_tabs.pack(fill="both", expand=True)
+        self._build_chart_tab(self.today_tabs)                            # the trends over the runs
+        stand = ttk.Frame(self.today_tabs)
+        self.stand_tab = stand
+        self.today_tabs.add(stand, text="Where you stand")
+        self.now_canvas, self.now_inner = self._scroll_area(stand, on_resize=lambda w: self._gauges_resized("now", w))
         self.fit_rows, self.adv = [], {}
         self.fit_view, self.fit_panel = None, None
+        self.gauge_cards, self.now_cards, self.gauge_summ = [], [], None
+        self._gauge_width, self._gauge_job = {}, {}
         self.fit_queue = queue.Queue()
-        self.fit_job, self.fit_thread, self.fit_id, self.fit_cancel, self.fit_stale = None, None, 0, None, True
+        self.fit_job, self.fit_thread, self.fit_id, self.fit_cancel, self.fit_threads = None, None, 0, None, []
         self.athlete = dict(rm.DEFAULT_ATHLETE)
 
     def _card(self, col, title, card, wide=False):
@@ -856,35 +978,55 @@ class App(tk.Tk):
                 ttk.Label(chip, text=f" ({day})", foreground="#888", font=("TkDefaultFont", 8)).pack(side="left")
         self.fit_footer.configure(text=view["footer"])
 
-    def _show_fit_panel(self, panel):
-        """The panel of the selected run: tiles, the time in each zone as a bar, the repetitions, notes."""
+    def _show_fit_panel(self, panel, message="Select a run in the list.", kms=None):
+        """The summary of the selected run: its facts, its numbers, the time in each zone as a bar, the kilometres, the repetitions, notes.
+        Two columns when the window is wide enough, one under the other when it is not."""
         for w in self.fit_inner.winfo_children():
             w.destroy()
-        self.fit_panel = panel
+        self.fit_panel, self.splits, self._panel_blocks = panel, None, None
         if not panel:
-            ttk.Label(self.fit_inner, text="Select a run in the table.", foreground="#888", padding=10).pack(anchor="w")
+            ttk.Label(self.fit_inner, text=message, foreground="#888", padding=10).pack(anchor="w")
             return
-        top = ttk.Frame(self.fit_inner)
+        left, right = ttk.Frame(self.fit_inner), ttk.Frame(self.fit_inner)
+        self._panel_blocks = (left, right)
+        top = ttk.Frame(left)
         top.pack(anchor="w", fill="x", pady=(2, 6))
         ttk.Label(top, text=panel["title"], font=("TkDefaultFont", 13, "bold")).pack(side="left")
         ttk.Label(top, text="   " + panel["subtitle"], foreground="#555").pack(side="left")
         if panel["badge"]:
             ttk.Label(top, text=" " + panel["badge"] + " ", foreground="white", background=GAUGE_FILL["info"], font=("TkDefaultFont", 8, "bold")).pack(side="left", padx=8)
-        tiles = ttk.Frame(self.fit_inner)
-        tiles.pack(anchor="w", fill="x")
-        for i, (label, value) in enumerate(panel["tiles"]):
-            tile = ttk.Frame(tiles, padding=(0, 0, 14, 6))
-            tile.grid(row=i // 3, column=i % 3, sticky="w")
-            ttk.Label(tile, text=label, foreground="#777", font=("TkDefaultFont", 8)).pack(anchor="w")
-            ttk.Label(tile, text=value, font=("TkDefaultFont", 11, "bold"), foreground="#222" if value != "-" else "#aaa").pack(anchor="w")
-        ttk.Label(self.fit_inner, text="Time in each heart-rate zone", foreground="#777", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(4, 0))
-        bar = tk.Canvas(self.fit_inner, width=FIT_PANEL_W, height=44, highlightthickness=0, background=self.cget("background"))
-        bar.pack(anchor="w")
-        self._draw_zone_bar(bar, panel["zones"])
+
+        def tiles(parent, items):
+            grid = ttk.Frame(parent)
+            grid.pack(anchor="w", fill="x")
+            for i, (label, value) in enumerate(items):
+                tile = ttk.Frame(grid, padding=(0, 0, 14, 6))
+                tile.grid(row=i // 3, column=i % 3, sticky="w")
+                ttk.Label(tile, text=label, foreground="#777", font=("TkDefaultFont", 8)).pack(anchor="w")
+                ttk.Label(tile, text=value, font=("TkDefaultFont", 11, "bold"), foreground="#222" if value != "-" else "#aaa").pack(anchor="w")
+
+        tiles(left, panel["facts"])
+        ttk.Label(left, text="Estimates from the heart rate and the speed" if panel["has_metrics"] else "The metrics of this run are being computed...",
+                  foreground="#777", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(6, 2))
+        tiles(left, panel["tiles"])
+        if panel["has_metrics"]:
+            ttk.Label(left, text="Time in each heart-rate zone", foreground="#777", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(4, 0))
+            bar = tk.Canvas(left, width=FIT_PANEL_W, height=44, highlightthickness=0, background=self.cget("background"))
+            bar.pack(anchor="w")
+            self._draw_zone_bar(bar, panel["zones"])
+        if kms:
+            ttk.Label(right, text="Kilometres", foreground="#777", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(4, 2))
+            self.splits = ttk.Treeview(right, columns=("km", "pace", "hr", "dalt", "note"), show="headings", height=len(kms), selectmode="none")
+            for key, title, width in (("km", "km", 46), ("pace", "Pace", 64), ("hr", "HR", 50), ("dalt", "Alt (m)", 64), ("note", "", 74)):
+                self.splits.heading(key, text=title)
+                self.splits.column(key, width=width, anchor="center", stretch=False)
+            for values in kms:
+                self.splits.insert("", "end", values=values)
+            self.splits.pack(anchor="w")
         if panel["reps"]:
-            ttk.Label(self.fit_inner, text="Repetitions", foreground="#777", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(8, 2))
+            ttk.Label(right, text="Repetitions", foreground="#777", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(8, 2))
             cols = ("n", "start", "time", "m", "pace", "hr", "max", "drop")
-            reps = ttk.Treeview(self.fit_inner, columns=cols, show="headings", height=len(panel["reps"]), selectmode="none")
+            reps = ttk.Treeview(right, columns=cols, show="headings", height=len(panel["reps"]), selectmode="none")
             for key, title, width in (("n", "#", 24), ("start", "Start", 46), ("time", "Time", 46), ("m", "m", 42), ("pace", "Pace", 46),
                                       ("hr", "HR", 36), ("max", "Max", 36), ("drop", "Drop 60s", 56)):
                 reps.heading(key, text=title)
@@ -893,9 +1035,22 @@ class App(tk.Tk):
                 reps.insert("", "end", values=row)
             reps.pack(anchor="w")
         if panel["warning"]:
-            self._selectable(self.fit_inner, panel["warning"], ("TkDefaultFont", 9, "bold"), GAUGE_TEXT["bad"], pixels=FIT_PANEL_W, pady=(8, 0))
+            self._selectable(right, panel["warning"], ("TkDefaultFont", 9, "bold"), GAUGE_TEXT["bad"], pixels=FIT_PANEL_W, pady=(8, 0))
         if panel["notes"]:
-            self._selectable(self.fit_inner, "\n".join(f"{i} {t}" for i, t in panel["notes"]), ("TkDefaultFont", 9), "#444", pixels=FIT_PANEL_W, pady=(8, 0))
+            self._selectable(right, "\n".join(f"{i} {t}" for i, t in panel["notes"]), ("TkDefaultFont", 9), "#444", pixels=FIT_PANEL_W, pady=(8, 0))
+        self._layout_panel()
+
+    def _layout_panel(self, width=None):
+        """Side by side when the canvas is wide enough for both columns, else the second under the first."""
+        if not self._panel_blocks:
+            return
+        left, right = self._panel_blocks
+        width = width or self.fit_canvas.winfo_width()
+        left.update_idletasks()
+        right.update_idletasks()
+        side = width >= left.winfo_reqwidth() + right.winfo_reqwidth() + 60
+        left.grid(row=0, column=0, sticky="nw")
+        right.grid(row=0 if side else 1, column=1 if side else 0, sticky="nw", padx=(30, 0) if side else 0, pady=0 if side else (10, 0))
 
     def _draw_zone_bar(self, cv, minutes):
         total = sum(minutes)
@@ -987,60 +1142,96 @@ class App(tk.Tk):
 
     # ── gauges ───────────────────────────────────────────────────────────
     def _build_gauges_tab(self):
-        tab = ttk.Frame(self.tabs)
+        tab = ttk.Frame(self.run_tabs)
         self.gauge_tab = tab
-        self.tabs.add(tab, text="Gauges")
-        bar = ttk.Frame(tab, padding=(10, 8, 10, 4))
-        bar.pack(fill="x")
-        ttk.Label(bar, text="Run:").pack(side="left")
-        self.gauge_run = tk.StringVar()
-        self.gauge_box = ttk.Combobox(bar, textvariable=self.gauge_run, state="readonly", width=34)
-        self.gauge_box.pack(side="left", padx=6)
-        self.gauge_box.bind("<<ComboboxSelected>>", lambda e: self.draw_gauges())
-        ttk.Label(bar, text="Coloured bands are the reference ranges; the needle is your value. The last line of each card says how far the range can be trusted.",
-                  foreground="#555").pack(side="left", padx=10)
+        self.run_tabs.add(tab, text="Gauges")
+        ttk.Label(tab, text="Coloured bands are the reference ranges; the needle is the value of the selected run. The last line of each card says how far "
+                            "the range can be trusted. The gauges about today (load ratio, form, VO2max) are on the Today tab.",
+                  foreground="#555", wraplength=640, justify="left").pack(anchor="w", padx=10, pady=(8, 2))
         body = ttk.Frame(tab)
         body.pack(fill="both", expand=True)
-        self.gauge_canvas = tk.Canvas(body, highlightthickness=0, background=self.cget("background"))
-        sb = ttk.Scrollbar(body, orient="vertical", command=self.gauge_canvas.yview)
-        self.gauge_canvas.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self.gauge_canvas.pack(side="left", fill="both", expand=True)
-        self.gauge_inner = ttk.Frame(self.gauge_canvas)
-        self.gauge_canvas.create_window((0, 0), window=self.gauge_inner, anchor="nw", tags="inner")
-        self.gauge_inner.bind("<Configure>", lambda e: self.gauge_canvas.configure(scrollregion=self.gauge_canvas.bbox("all")))
-        self.gauge_canvas.bind("<Configure>", lambda e: self.gauge_canvas.itemconfigure("inner", width=e.width))
-        self.gauge_canvas.bind("<MouseWheel>", lambda e: self.gauge_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
-        self.gauge_summ = None
+        self.gauge_canvas, self.gauge_inner = self._scroll_area(body, on_resize=lambda w: self._gauges_resized("run", w))
+
+    def _gauge_cards(self, inner, gauges, columns=3, avail=760):
+        """One card per gauge, `columns` to a row, sized to the room: the dial, the verdict, what the value means, and where the range comes from."""
+        for w in inner.winfo_children():
+            w.destroy()
+        columns = max(1, min(columns, int(avail // 250)))          # three to a row when the room allows it, else two or one
+        for c in range(4):
+            inner.columnconfigure(c, weight=0, uniform="")
+        cell = min(380, int(avail / columns) - 52)                 # the width of the text and of the dial of one card
+        dw = min(GAUGE_W, cell)
+        dh = int(dw * GAUGE_H / GAUGE_W)
+        cards = []
+        for i, g in enumerate(gauges):
+            card = ttk.LabelFrame(inner, text=g["title"], padding=8)
+            card.grid(row=i // columns, column=i % columns, sticky="nsew", padx=6, pady=6)
+            inner.columnconfigure(i % columns, weight=1, uniform="g")
+            cv = tk.Canvas(card, width=dw, height=dh, highlightthickness=0, background=self.cget("background"))
+            cv.pack()
+            self._draw_gauge(cv, g, dw, dh)
+            verdict = f"{g['label']}: {g['advice']}" if g["value"] is not None else (g["advice"] or "No data for this run.")
+            self._selectable(card, verdict, ("TkDefaultFont", 10, "bold"), GAUGE_TEXT[g["tone"]] if g["value"] is not None else None, pixels=cell, pady=(4, 2))
+            self._selectable(card, g["why"], ("TkDefaultFont", 10), pixels=cell, pady=2)
+            self._selectable(card, f"Reference ({GAUGE_LEVEL[g['level']]}): {g['source']}", ("TkDefaultFont", 8), "#666", pixels=cell, pady=(2, 0))
+            cards.append((card, g))
+        return cards
+
+    def _gauge_room(self, canvas, key):
+        w = canvas.winfo_width()
+        w = w if w > 200 else 760                                  # not shown yet: a usual width
+        self._gauge_width[key] = w
+        return w - 24
+
+    def _gauges_resized(self, key, width):
+        """The window changed width: draw the cards again to fit (once it has settled)."""
+        if abs(width - self._gauge_width.get(key, 0)) < 40:
+            return
+        if self._gauge_job.get(key):
+            self.after_cancel(self._gauge_job[key])
+        self._gauge_job[key] = self.after(250, self.draw_gauges if key == "run" else self.draw_now_gauges)
+
+    def _message(self, inner, text):
+        for w in inner.winfo_children():
+            w.destroy()
+        ttk.Label(inner, text=text, foreground="#888", padding=20).pack(anchor="w")
 
     def draw_gauges(self):
-        """One card per value that has a reference range, for the chosen run (the load ones are as of today)."""
-        for w in self.gauge_inner.winfo_children():
-            w.destroy()
-        self.gauge_cards = []
-        rows = self.fit_rows
-        if not rows:
-            ttk.Label(self.gauge_inner, text="Import some runs to see the gauges.", padding=20).pack()
-            self.gauge_box.configure(values=[])
+        """The gauges of the selected run."""
+        row = self.selected_row()
+        m = self.adv.get(core.session_key(row)) if row else None
+        if not m:
+            self.gauge_cards = []
+            self._message(self.gauge_inner, "Select a run in the list." if not row else "The metrics of this run are not ready yet.")
             return
-        names = [f"{r['date']} {r['time']}   {r['dist_km'] or 0:.2f} km" for r in reversed(rows)]
-        self.gauge_box.configure(values=names)
-        if self.gauge_run.get() not in names:
-            self.gauge_run.set(names[0])
-        m = rows[len(rows) - 1 - names.index(self.gauge_run.get())]
+        gauges = [g for g in rm.gauges(m, row, self.gauge_summ) if g["key"] not in NOW_GAUGES]
+        self.gauge_cards = self._gauge_cards(self.gauge_inner, gauges, 3, self._gauge_room(self.gauge_canvas, "run"))
+
+    def draw_now_gauges(self):
+        """The gauges about today (the load, the form, the VO2max), on the Today tab."""
+        if not self.fit_rows or not self.gauge_summ:
+            self.now_cards = []
+            self._message(self.now_inner, "Import some runs to see where you stand.")
+            return
+        m = self.fit_rows[-1]
         session = next((r for r in self.history if core.session_key(r) == (m["date"], m["time"])), None)
-        for i, g in enumerate(rm.gauges(m, session, self.gauge_summ)):
-            card = ttk.LabelFrame(self.gauge_inner, text=g["title"], padding=8)
-            card.grid(row=i // 2, column=i % 2, sticky="nsew", padx=8, pady=6)
-            self.gauge_inner.columnconfigure(i % 2, weight=1, uniform="g")
-            cv = tk.Canvas(card, width=GAUGE_W, height=GAUGE_H, highlightthickness=0, background=self.cget("background"))
-            cv.pack()
-            self._draw_gauge(cv, g)
-            verdict = f"{g['label']}: {g['advice']}" if g["value"] is not None else (g["advice"] or "No data for this run.")
-            self._selectable(card, verdict, ("TkDefaultFont", 10, "bold"), GAUGE_TEXT[g["tone"]] if g["value"] is not None else None, pady=(4, 2))
-            self._selectable(card, g["why"], ("TkDefaultFont", 10), pady=2)
-            self._selectable(card, f"Reference ({GAUGE_LEVEL[g['level']]}): {g['source']}", ("TkDefaultFont", 8), "#666", pady=(2, 0))
-            self.gauge_cards.append((card, g))
+        gauges = [g for g in rm.gauges(m, session, self.gauge_summ) if g["key"] in NOW_GAUGES]
+        self.now_cards = self._gauge_cards(self.now_inner, gauges, 3, self._gauge_room(self.now_canvas, "now"))
+
+    def _read_only(self, box):
+        """Make a Text widget readable and selectable but not editable: the typing keys are blocked, Ctrl+C and Ctrl+A and a right-click menu work."""
+        def key(event):
+            ctrl = event.state & 0x4
+            return None if ctrl and event.keysym.lower() in ("c", "a") else "break"
+
+        def select_all(event):
+            event.widget.tag_add("sel", "1.0", "end-1c")
+            return "break"
+
+        box.bind("<Key>", key)
+        box.bind("<Control-a>", select_all)
+        box.bind("<Button-1>", lambda e: box.focus_set())
+        box.bind("<Button-3>", lambda e: self._copy_menu(e, box))
 
     def _selectable(self, parent, text, font, foreground=None, pixels=430, pady=(0, 0)):
         """A block of text that can be selected and copied (Ctrl+C, or the menu of a right click) but not edited: a Text widget with the
@@ -1050,7 +1241,7 @@ class App(tk.Tk):
         for paragraph in text.split("\n"):
             for word in paragraph.split():                  # the same greedy wrapping as the widget, measured in pixels
                 trial = f"{line} {word}".strip()
-                if line and f.measure(trial) > pixels - 6:
+                if line and f.measure(trial) > pixels * 0.95 - 8:
                     lines, line = lines + 1, word
                 else:
                     line = trial
@@ -1062,18 +1253,7 @@ class App(tk.Tk):
             box.configure(foreground=foreground)
         box.insert("1.0", text)
 
-        def key(event):
-            ctrl = event.state & 0x4
-            return None if ctrl and event.keysym.lower() in ("c", "a") else "break"    # copy and select all only
-
-        def select_all(event):
-            event.widget.tag_add("sel", "1.0", "end-1c")
-            return "break"
-
-        box.bind("<Key>", key)
-        box.bind("<Control-a>", select_all)
-        box.bind("<Button-1>", lambda e: box.focus_set())
-        box.bind("<Button-3>", lambda e: self._copy_menu(e, box))
+        self._read_only(box)
         box.pack(anchor="w", pady=pady)
         return box
 
@@ -1083,9 +1263,10 @@ class App(tk.Tk):
         menu.add_command(label="Select all", command=lambda: box.tag_add("sel", "1.0", "end-1c"))
         menu.tk_popup(event.x_root, event.y_root)
 
-    def _draw_gauge(self, cv, g):
-        """A half-circle scale with the bands as coloured arcs and a needle at the value."""
-        cx, cy, r, width = GAUGE_W / 2, GAUGE_H - 34, 98, 20
+    def _draw_gauge(self, cv, g, w=GAUGE_W, h=GAUGE_H):
+        """A half-circle scale with the bands as coloured arcs and a needle at the value, scaled to the w x h of the canvas."""
+        k = w / GAUGE_W
+        cx, cy, r, width = w / 2, h - 34 * k, 98 * k, 20 * k
         box = (cx - r, cy - r, cx + r, cy + r)
         span = float(g["hi"] - g["lo"])
         frac = lambda v: (min(max(v, g["lo"]), g["hi"]) - g["lo"]) / span
@@ -1095,18 +1276,18 @@ class App(tk.Tk):
         edges = sorted({b[0] for b in g["bands"]} | {g["hi"]})
         for v in edges:                                               # the limits between the bands, outside the arc
             ang = math.radians(180 - 180 * frac(v))
-            x, y = cx + (r + width / 2 + 11) * math.cos(ang), cy - (r + width / 2 + 11) * math.sin(ang)
-            cv.create_text(x, y, text=f"{v:g}", fill="#666", font=("TkDefaultFont", 7))
+            x, y = cx + (r + width / 2 + 11 * k) * math.cos(ang), cy - (r + width / 2 + 11 * k) * math.sin(ang)
+            cv.create_text(x, y, text=f"{v:.3g}", fill="#666", font=("TkDefaultFont", 7))
         if g["value"] is None:
             cv.create_text(cx, cy - 20, text="no data", fill="#888", font=("TkDefaultFont", 12))
             return
         ang = math.radians(180 - 180 * frac(g["value"]))
-        tip = (cx + (r - 6) * math.cos(ang), cy - (r - 6) * math.sin(ang))
+        tip = (cx + (r - 6 * k) * math.cos(ang), cy - (r - 6 * k) * math.sin(ang))
         cv.create_line(cx, cy, *tip, width=3, fill="#222", capstyle="round")
         cv.create_oval(cx - 6, cy - 6, cx + 6, cy + 6, fill="#222", outline="")
-        cv.create_text(cx, cy + 20, text=g["text"], font=("TkDefaultFont", 15, "bold"))
+        cv.create_text(cx, cy + 20 * k, text=g["text"], font=("TkDefaultFont", 15, "bold"))
         if g["value"] < g["lo"] or g["value"] > g["hi"]:
-            cv.create_text(cx, cy + 36, text="(off the scale)", fill="#888", font=("TkDefaultFont", 8))
+            cv.create_text(cx, cy + 36 * k, text="(off the scale)", fill="#888", font=("TkDefaultFont", 8))
 
     def _write(self, widget, text):
         widget.configure(state="normal")
@@ -1126,33 +1307,20 @@ class App(tk.Tk):
         self.start_fitness()
 
     def start_fitness(self):
-        """The history changed, so the metrics are stale. They are computed when a tab that shows them is the selected one."""
+        """The history changed: compute the metrics again (in a thread; the file of results makes it quick)."""
         self.fit_id += 1                                   # a result still on its way belongs to the old history
         if not self._dir() or not self.history:
-            self.fit_stale = False
             self.apply_fitness(self.fit_id, [], None)
             return
-        self.fit_stale = True
-        self.ensure_fitness()
-
-    def ensure_fitness(self):
-        """Start the computation if the metrics are stale and the Fitness tab, or Charts on an advanced metric, is showing."""
-        if not self.fit_stale:
-            return
-        sel = self.tabs.select()
-        charts = sel == str(self.tabs.tabs()[1]) and next(m for m in METRICS if m[0] == self.metric.get())[1].startswith("adv.")
-        if sel in (str(self.fit_tab), str(self.gauge_tab)) or charts:
-            self._run_fitness()
+        self._run_fitness()
 
     def _tab_changed(self):
         self.draw_map()
-        self.ensure_fitness()
 
     def _run_fitness(self):
         """Compute the advanced metrics in a thread (a few seconds the first time, then the cache); the result comes back through
         fit_queue. The thread must not touch the window (Tk objects dying in another thread crash), so it gets plain values."""
         d = self._dir()
-        self.fit_stale = False
         self.fit_id += 1
         self.athlete = rm.read_athlete(d)
         if self.fit_cancel:
@@ -1176,6 +1344,7 @@ class App(tk.Tk):
                 out.put((job, None, f"Could not compute the advanced metrics: {e}"))
 
         self.fit_thread = threading.Thread(target=work, daemon=True)
+        self.fit_threads = [t for t in self.fit_threads if t.is_alive()] + [self.fit_thread]    # a cancelled one may still hold a CSV open
         self.fit_thread.start()
         if self.fit_job is None:
             self.fit_job = self.after(150, self._fit_poll)
@@ -1201,46 +1370,43 @@ class App(tk.Tk):
         """Synchronous version (used by the tests)."""
         d = self._dir()
         self.fit_id += 1
-        self.fit_stale = False
         self.athlete = rm.read_athlete(d) if d else dict(rm.DEFAULT_ATHLETE)
         rows = rm.compute_all(d, self.history, self.athlete) if d else []
         self.apply_fitness(self.fit_id, rows, rm.summary(rows, self.history, self.athlete) if rows else None)
 
     def apply_fitness(self, job, rows, summ):
-        self.fit_tree.delete(*self.fit_tree.get_children())
+        """The metrics are ready: the cards of the Today tab, the metric columns of the list, and the views of the selected run."""
         self.gauge_summ = summ if isinstance(summ, dict) else None
         self.fit_view = None
         if rows is None:
             self.fit_rows, self.adv = [], {}
             self.fit_message.set(summ)
-            self._fill_dashboard(None)
-            self._show_fit_panel(None)
-            self.draw_gauges()
-            return
-        self.fit_rows = rows
-        self.adv = {(m["date"], m["time"]): m for m in rows}
-        for i in range(len(rows) - 1, -1, -1):           # newest first
-            self.fit_tree.insert("", "end", iid=str(i), values=[c[3](rows[i]) for c in FITNESS_COLUMNS])
-        d = self._dir()
-        if not summ:
-            self.fit_message.set("Import some runs to see the advanced metrics.")
-        elif d and not os.path.exists(os.path.join(d, rm.ATHLETE_FILE)):
-            self.fit_message.set(f"No {rm.ATHLETE_FILE} in the data folder: default parameters. Set yours with the Athlete button.")
         else:
-            self.fit_message.set("")
-        if summ:
-            self.fit_view = rm.dashboard(rm.next_session(self.history, rows, summ), summ)
+            self.fit_rows = rows
+            self.adv = {(m["date"], m["time"]): m for m in rows}
+            d = self._dir()
+            if not summ:
+                self.fit_message.set("Import some runs to see the advanced metrics.")
+            elif d and not os.path.exists(os.path.join(d, rm.ATHLETE_FILE)):
+                self.fit_message.set(f"No {rm.ATHLETE_FILE} in the data folder: default parameters. Set yours with the Athlete button.")
+            else:
+                self.fit_message.set("")
+            if summ:
+                self.fit_view = rm.dashboard(rm.next_session(self.history, rows, summ), summ)
         self._fill_dashboard(self.fit_view)
-        kids = self.fit_tree.get_children()
-        if kids:
-            self.fit_tree.selection_set(kids[0])         # the newest run
-        self.fit_show()
-        self.draw_chart()
+        self.draw_now_gauges()
+        self.refresh_cells()
+        self.show_run_summary()
         self.draw_gauges()
+        self.draw_chart()
 
-    def fit_show(self):
-        sel = self.fit_tree.selection()
-        self._show_fit_panel(rm.run_panel(self.fit_rows[int(sel[0])]) if sel else None)
+    def show_run_summary(self):
+        """The summary of the selected run, from its history row, its metrics (when they are computed) and what reading its CSV added."""
+        row = self.selected_row()
+        if not row:
+            self._show_fit_panel(None, "Select a run in the list.")
+            return
+        self._show_fit_panel(rm.run_panel(self.adv.get(core.session_key(row)), row, self.run_extra), kms=self.run_kms)
 
     def _metric_value(self, row, key):
         if key.startswith("adv."):
@@ -1254,64 +1420,53 @@ class App(tk.Tk):
         return next((r for r in self.history if "|".join(core.session_key(r)) == sel[0]), None)
 
     # ── detail ───────────────────────────────────────────────────────────
-    def _write_detail(self, text):
-        self.detail.configure(state="normal")
-        self.detail.delete("1.0", "end")
-        self.detail.insert("1.0", text)
-        self.detail.configure(state="disabled")
-
     def show_detail(self):
-        self.splits.delete(*self.splits.get_children())
         self.run = None
         row = self.selected_row()
+        if row:
+            self.last_run = "|".join(core.session_key(row))
         self.run_title.set(f"{row['date']} {row['time']}   {row['dist_km']} km" if row else "")
         self.map_tiles = {k: v for k, v in self.map_tiles.items() if v}      # retry the tiles that failed (offline before)
         self.map_view = None                                                  # a new run: fit its track
         try:
             self._show_detail(row)
         finally:
+            self.show_run_summary()
+            self.draw_gauges()
             self.draw_run()
             self.draw_map()
 
     def _show_detail(self, row):
+        """Read the CSV of the run: its points (for the chart and the map), its kilometres and what the summary adds to the history row."""
+        self.run_kms, self.run_extra = [], {}
         if not row:
-            self._write_detail("")
             return
-        lines = [f"{row['date']} {row['time']}   {row['dist_km']} km   {row['duration_hms']}   {row['pace_minkm']}/km",
-                 f"HR {row['avg_hr_bpm']} bpm   EF {row['ef_m_beat']}   Drift {row['drift_pct']}%   TSS {row['tss']}"]
-        if row.get("kind") == "intervals":
-            lines.append("Interval workout: the drift and the efficiency are not defined for it; the repetitions are listed in the Fitness tab.")
-        if row.get("temp_c"):
-            lines.append(f"Weather: {row['temp_c']}°C  {row.get('humidity_pct', '')}% humidity  {row.get('wind_kmh', '')} km/h wind")
-        d = self._dir()
+        notes, d = [], self._dir()
         path = core.session_file(d, row) if d else None
         if path and core.merged_members(d).get(os.path.basename(path)):
-            n = 1 + len(core.merged_members(d)[os.path.basename(path)])
-            lines.append(f"Merged from {n} recordings (right-click: Unmerge runs).")
+            notes.append(("\u2022", f"Merged from {1 + len(core.merged_members(d)[os.path.basename(path)])} recordings (right-click in the list: Unmerge runs)."))
+        alt = None
         if not path:
-            lines.append("\nRun CSV not found in the folder: per-km detail not available.")
+            notes.append(("\u26a0", "Run CSV not found in the folder: per-km detail not available."))
         else:
             try:
                 res = core.analyze_file(path, fetch=False)
             except ValueError as e:
-                lines.append(f"\nCannot read the CSV: {e}")
+                notes.append(("\u26a0", f"Cannot read the CSV: {e}"))
             else:
                 self.run = (row, res["points"])
                 if res["alt_min"] is not None:
-                    lines.append(f"Altitude: {res['alt_min']:.1f} to {res['alt_max']:.1f} m")
+                    alt = (res["alt_min"], res["alt_max"])
                 if res["is_sprint"]:
                     sk = res["splits"][res["sprint_idx"]]
-                    lines.append(f"⚡ Final sprint (km {sk['km']}, {core.format_pace(sk['pace_s'])}/km): excluded from the drift")
+                    notes.append(("\u26a1", f"Final sprint (km {sk['km']}, {core.format_pace(sk['pace_s'])}/km): excluded from the drift."))
                 for w in core.weather_warnings({"temp_c": core.safe_float(row.get("temp_c")) or 0,
                                                 "humidity_pct": core.safe_float(row.get("humidity_pct")) or 0}):
-                    lines.append(f"⚠ {w}")
-                for i, sp in enumerate(res["splits"]):
-                    self.splits.insert("", "end", values=(
-                        sp["km"], core.format_pace(sp["pace_s"]),
-                        f"{sp['avg_hr']:.0f}" if sp.get("avg_hr") else "—",
-                        f"{sp['alt_delta']:+.1f}" if sp["alt_delta"] is not None else "—",
-                        "⚡ sprint" if res["is_sprint"] and i == res["sprint_idx"] else ""))
-        self._write_detail("\n".join(lines))
+                    notes.append(("\u26a0", w))
+                self.run_kms = [(sp["km"], core.format_pace(sp["pace_s"]), f"{sp['avg_hr']:.0f}" if sp.get("avg_hr") else "\u2014",
+                                 f"{sp['alt_delta']:+.1f}" if sp["alt_delta"] is not None else "\u2014",
+                                 "\u26a1 sprint" if res["is_sprint"] and k == res["sprint_idx"] else "") for k, sp in enumerate(res["splits"])]
+        self.run_extra = {"alt": alt, "notes": notes}
 
     # ── chart ────────────────────────────────────────────────────────────
     def draw_chart(self):
@@ -1431,6 +1586,7 @@ class App(tk.Tk):
         history = core.merge_sessions(result["history"], sessions)
         self.history = history
         self.save_history()
+        self.last_run = None                               # after an import the newest run is the one to look at
         self.refresh_table()
         self.draw_chart()
         self.start_fitness()
@@ -1446,14 +1602,15 @@ class App(tk.Tk):
         if errors:
             messagebox.showwarning("Files not imported", "\n".join(f"{f}: {m}" for f, m in errors))
         if sessions:
-            self.tabs.select(self.fit_tab)
+            self.tabs.select(self.today_tab)
 
     # ── misc ─────────────────────────────────────────────────────────────
     def _on_error(self, exc, val, tb):
         messagebox.showerror("Error", f"{exc.__name__}: {val}")
 
     def _save_config(self):
-        save_config(self.config_path, {"data_dir": self.data_dir.get(), "fetch_weather": self.fetch.get(), "fit_dir": self.fit_dir.get()})
+        save_config(self.config_path, {"data_dir": self.data_dir.get(), "fetch_weather": self.fetch.get(), "fit_dir": self.fit_dir.get(),
+                                       "columns": self.columns_shown(), "last_run": self.last_run})
 
     def _close(self):
         self._save_config()
@@ -1462,8 +1619,8 @@ class App(tk.Tk):
             self.fit_cancel.set()           # the metrics thread stops at its next file; wait for it (it holds the CSVs open)
         if self.fit_job is not None:
             self.after_cancel(self.fit_job)
-        if self.fit_thread is not None:
-            self.fit_thread.join(timeout=30)
+        for t in self.fit_threads:
+            t.join(timeout=30)
         if self._tile_job is not None:
             self.after_cancel(self._tile_job)
         self.tile_req.put(None)                       # stops the tile worker
